@@ -183,10 +183,21 @@ export interface CommentDTO {
  *  affordance for exactly this window so client and server agree. */
 export const COMMENT_UNDO_WINDOW_MS = 15 * 60 * 1000;
 
+/** A comment thread. Threads belong to the document: a thread started on one
+ *  version is carried to each later version while it is open (see
+ *  `contextChanged`). */
 export interface ThreadDTO {
   id: string;
+  /** The version the thread was started on. */
   versionId: string;
+  versionNumber: number;
+  /** Where the thread sits on the version that was listed. When
+   *  `contextChanged` is true, or in single-thread responses, this is the
+   *  anchor the thread was started with. */
   anchor: AnchorData;
+  /** True when the thread's quoted text could not be found on the listed
+   *  version: it shows there without a highlight. */
+  contextChanged: boolean;
   resolvedAt: string | null;
   resolvedBy: string | null;
   resolvedByDisplayName: string | null;

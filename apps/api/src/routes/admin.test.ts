@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { insertThread } from '../testing/threads.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,7 +58,7 @@ describe('GET /api/admin/stats', () => {
         id: versionId, documentId: docId, versionNumber: 1,
         storageKey: `v1/${versionId}.html`, sizeBytes: 0, versionNote: null,
       });
-      await db.insert(threads).values({
+      await insertThread({
         id: threadId, versionId,
         anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
       });
@@ -96,7 +97,7 @@ describe('GET /api/admin/stats', () => {
         id: versionId, documentId: aliveDocId, versionNumber: 1,
         storageKey: `v1/${versionId}.html`, sizeBytes: 0, versionNote: null,
       });
-      await db.insert(threads).values({
+      await insertThread({
         id: threadId, versionId,
         anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
       });
@@ -136,12 +137,12 @@ describe('GET /api/admin/stats', () => {
 
       const oldThreadId = uuidv7();
       const newThreadId = uuidv7();
-      await db.insert(threads).values({
+      await insertThread({
         id: oldThreadId, versionId: newVersionId,
         anchor: { type: 'text-range', selectorText: 'a', prefix: '', suffix: '', containerPath: 'body' },
         createdAt: oldDate,
       });
-      await db.insert(threads).values({
+      await insertThread({
         id: newThreadId, versionId: newVersionId,
         anchor: { type: 'text-range', selectorText: 'b', prefix: '', suffix: '', containerPath: 'body' },
       });

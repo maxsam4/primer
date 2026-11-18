@@ -6,7 +6,7 @@ import { isTextRangeAnchor, isElementPathAnchor } from '@polygonlabs/primer-api-
 import type { AppVariables, AppDeps } from '../app.ts';
 import { logger } from '../logger.ts';
 import type { CommentDTO, CreateThreadRequest, ThreadDTO, ThreadsListResponse } from '@polygonlabs/primer-api-types';
-import { threads, comments, users } from '../db/schema.ts';
+import { threads, threadPlacements, versions, comments, users } from '../db/schema.ts';
 import { db } from '../db/client.ts';
 import { validateAndCleanMentions } from '../notifications/mentions.ts';
 import type { Visibility } from '../lib/permissions.ts';
@@ -68,7 +68,10 @@ async function loadDocContextForThread(
 interface ThreadRow {
   id: string;
   versionId: string;
+  versionNumber: number;
   anchor: unknown;
+  /** Present when listing a version: the anchor there (null = context changed). */
+  placementAnchor?: unknown;
   resolvedAt: Date | null;
   resolvedBy: string | null;
   resolvedByDisplayName: string | null;
@@ -103,10 +106,13 @@ function commentToDTO(row: CommentRow): CommentDTO {
 }
 
 function threadToDTO(row: ThreadRow, threadComments: CommentRow[]): ThreadDTO {
+  const placed = row.placementAnchor === undefined ? row.anchor : row.placementAnchor;
   return {
     id: row.id,
     versionId: row.versionId,
-    anchor: row.anchor as ThreadDTO['anchor'],
+    versionNumber: row.versionNumber,
+    anchor: (placed ?? row.anchor) as ThreadDTO['anchor'],
+    contextChanged: placed === null,
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
     resolvedBy: row.resolvedBy,
     resolvedByDisplayName: row.resolvedByDisplayName,
@@ -124,9 +130,10 @@ async function computeVersionEtag(versionId: string): Promise<string> {
       ), 'epoch'::timestamptz) AS max_ts,
       COUNT(DISTINCT t.id)::int AS thread_count,
       COUNT(c.id)::int AS comment_count
-    FROM threads t
+    FROM thread_placements p
+    INNER JOIN threads t ON t.id = p.thread_id
     LEFT JOIN comments c ON c.thread_id = t.id
-    WHERE t.version_id = ${versionId}
+    WHERE p.version_id = ${versionId}
   `);
   const row = (result as unknown as { max_ts: string | Date; thread_count: number; comment_count: number }[])[0];
   const maxTsIso = row.max_ts instanceof Date ? row.max_ts.toISOString() : new Date(row.max_ts).toISOString();
@@ -155,6 +162,7 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
     .select({
       id: threads.id,
       versionId: threads.versionId,
+      versionNumber: versions.versionNumber,
       anchor: threads.anchor,
       resolvedAt: threads.resolvedAt,
       resolvedBy: threads.resolvedBy,
@@ -162,6 +170,7 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
       createdAt: threads.createdAt,
     })
     .from(threads)
+    .innerJoin(versions, eq(versions.id, threads.versionId))
     .leftJoin(users, eq(users.id, threads.resolvedBy))
     .where(eq(threads.id, threadId))) as ThreadRow[];
   if (!row) return null;
@@ -184,6 +193,32 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
     .orderBy(comments.createdAt)) as CommentRow[];
 
   return threadToDTO(row, commentRows);
+}
+
+export type ResolveResult =
+  | { ok: true; thread: ThreadDTO }
+  | { ok: false; status: 403 | 404; error: 'forbidden' | 'not_found' };
+
+/** Resolves a thread as `user` (the document owner or the thread's starter).
+ *  Shared by the REST route and the MCP resolve tool. */
+export async function resolveThread(user: { id: string }, threadId: string): Promise<ResolveResult> {
+  const ctx = await loadDocContextForThread(threadId);
+  if (!ctx.ok) return { ok: false, status: 404, error: 'not_found' };
+  const collabRole = await loadCollaboratorRole(ctx.docId, user.id);
+  const eff = effectiveRole(ctx, user.id, collabRole);
+  if (!canRead(ctx.visibility, eff)) return { ok: false, status: 404, error: 'not_found' };
+
+  const authz = await authorizeThreadMutation(threadId, user.id);
+  if (authz === 'not_found') return { ok: false, status: 404, error: 'not_found' };
+  if (authz === 'forbidden') return { ok: false, status: 403, error: 'forbidden' };
+
+  await db
+    .update(threads)
+    .set({ resolvedAt: new Date(), resolvedBy: user.id })
+    .where(eq(threads.id, threadId));
+  const dto = await loadThreadDTO(threadId);
+  if (!dto) return { ok: false, status: 404, error: 'not_found' };
+  return { ok: true, thread: dto };
 }
 
 export function registerThreadRoutes(
@@ -213,15 +248,19 @@ export function registerThreadRoutes(
       .select({
         id: threads.id,
         versionId: threads.versionId,
+        versionNumber: versions.versionNumber,
         anchor: threads.anchor,
         resolvedAt: threads.resolvedAt,
         resolvedBy: threads.resolvedBy,
         resolvedByDisplayName: users.displayName,
         createdAt: threads.createdAt,
+        placementAnchor: threadPlacements.anchor,
       })
-      .from(threads)
+      .from(threadPlacements)
+      .innerJoin(threads, eq(threads.id, threadPlacements.threadId))
+      .innerJoin(versions, eq(versions.id, threads.versionId))
       .leftJoin(users, eq(users.id, threads.resolvedBy))
-      .where(eq(threads.versionId, versionId))
+      .where(eq(threadPlacements.versionId, versionId))
       .orderBy(threads.createdAt)) as ThreadRow[];
 
     const commentRows =
@@ -353,9 +392,11 @@ export function registerThreadRoutes(
     await db.transaction(async (tx) => {
       await tx.insert(threads).values({
         id: threadId,
+        documentId: latestRow.doc_id,
         versionId,
         anchor: payload.anchor!,
       });
+      await tx.insert(threadPlacements).values({ threadId, versionId, anchor: payload.anchor! });
       await tx.insert(comments).values({
         id: commentId,
         threadId,
@@ -384,26 +425,9 @@ export function registerThreadRoutes(
   });
 
   app.post('/api/threads/:threadId/resolve', async (c) => {
-    const threadId = c.req.param('threadId');
-
-    const ctx = await loadDocContextForThread(threadId);
-    if (!ctx.ok) return c.json({ error: 'not_found' }, 404);
-    const user = c.get('user');
-    const collabRole = await loadCollaboratorRole(ctx.docId, user.id);
-    const eff = effectiveRole(ctx, user.id, collabRole);
-    if (!canRead(ctx.visibility, eff)) return c.json({ error: 'not_found' }, 404);
-
-    const authz = await authorizeThreadMutation(threadId, user.id);
-    if (authz === 'not_found') return c.json({ error: 'not_found' }, 404);
-    if (authz === 'forbidden') return c.json({ error: 'forbidden' }, 403);
-
-    await db
-      .update(threads)
-      .set({ resolvedAt: new Date(), resolvedBy: user.id })
-      .where(eq(threads.id, threadId));
-    const dto = await loadThreadDTO(threadId);
-    if (!dto) return c.json({ error: 'not_found' }, 404);
-    return c.json(dto, 200);
+    const out = await resolveThread(c.get('user'), c.req.param('threadId'));
+    if (!out.ok) return c.json({ error: out.error }, out.status);
+    return c.json(out.thread, 200);
   });
 
   app.post('/api/threads/:threadId/reopen', async (c) => {

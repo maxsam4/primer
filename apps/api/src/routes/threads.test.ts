@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { insertThread } from '../testing/threads.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +63,7 @@ describe('GET /api/versions/:versionId/threads — happy path', () => {
       const { versionId } = await seedDocument();
       const threadId = uuidv7();
       const commentId = uuidv7();
-      await db.insert(threads).values({
+      await insertThread({
         id: threadId,
         versionId,
         anchor: { type: 'text-range', selectorText: 't', prefix: '', suffix: '', containerPath: 'body' },
@@ -111,7 +112,7 @@ describe('GET /api/versions/:versionId/threads — ETag/304', () => {
       const etag1 = r1.headers.get('etag');
 
       const threadId = uuidv7();
-      await db.insert(threads).values({
+      await insertThread({
         id: threadId,
         versionId,
         anchor: { type: 'text-range', selectorText: 't', prefix: '', suffix: '', containerPath: 'body' },
@@ -223,7 +224,7 @@ describe('POST /api/versions/:versionId/threads', () => {
 
 async function seedThread(versionId: string) {
   const threadId = uuidv7();
-  await db.insert(threads).values({
+  await insertThread({
     id: threadId,
     versionId,
     anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },

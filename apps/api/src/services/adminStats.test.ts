@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { insertThread } from '../testing/threads.ts';
 import { v7 as uuidv7 } from 'uuid';
 import { utcDateString, buildDateSpine, leftJoinDailyCounts, buildAdoption, buildEngagement, buildOperational } from './adminStats.ts';
 import { db } from '../db/client.ts';
@@ -82,7 +83,7 @@ describe('buildAdoption', () => {
       storageKey: `v1/${versionId}.html`, sizeBytes: 100, versionNote: null,
       createdAt: daysAgo(2),
     });
-    await db.insert(threads).values({
+    await insertThread({
       id: threadId, versionId,
       anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: daysAgo(2),
@@ -120,7 +121,7 @@ describe('buildAdoption', () => {
       storageKey: `v1/${versionId}.html`, sizeBytes: 0, versionNote: null,
       createdAt: when,
     });
-    await db.insert(threads).values({
+    await insertThread({
       id: threadId, versionId,
       anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: when,
@@ -216,7 +217,7 @@ describe('buildEngagement', () => {
       id: versionId, documentId: docId, versionNumber: 1,
       storageKey: `v1/${versionId}.html`, sizeBytes: 0, versionNote: null,
     });
-    await db.insert(threads).values({
+    await insertThread({
       id: threadId, versionId,
       anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
     });
@@ -311,7 +312,7 @@ describe('buildOperational', () => {
     });
     const threadOpenedDay = daysAgo(5);
     const threadResolvedDay = daysAgo(2);
-    await db.insert(threads).values({
+    await insertThread({
       id: uuidv7(), versionId,
       anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: threadOpenedDay,
@@ -341,13 +342,13 @@ describe('buildOperational', () => {
       storageKey: `v1/${versionId}.html`, sizeBytes: 0, versionNote: null,
     });
     // Aged & unresolved → counts.
-    await db.insert(threads).values({
+    await insertThread({
       id: uuidv7(), versionId,
       anchor: { type: 'text-range', selectorText: 'a', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: daysAgo(20),
     });
     // Aged & resolved → does NOT count.
-    await db.insert(threads).values({
+    await insertThread({
       id: uuidv7(), versionId,
       anchor: { type: 'text-range', selectorText: 'b', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: daysAgo(20),
@@ -355,7 +356,7 @@ describe('buildOperational', () => {
       resolvedBy: userId,
     });
     // Young & unresolved → does NOT count.
-    await db.insert(threads).values({
+    await insertThread({
       id: uuidv7(), versionId,
       anchor: { type: 'text-range', selectorText: 'c', prefix: '', suffix: '', containerPath: 'body' },
       createdAt: daysAgo(5),

@@ -328,7 +328,16 @@ export function ThreadCard({ versionId, thread, drifted, currentUserId, onHighli
       }}
     >
       <div className="mb-1.5 flex items-start gap-1 border-l-2 border-yellow-300 dark:border-amber-700 pl-2 italic leading-snug text-neutral-600 dark:text-neutral-400">
-        {drifted && <span title="Could not place anchor" className="not-italic">📍?</span>}
+        {thread.contextChanged ? (
+          <span
+            title="The quoted text is not in this version"
+            className="not-italic shrink-0 rounded bg-neutral-100 dark:bg-neutral-800 px-1 text-[10px] text-neutral-500 dark:text-neutral-400"
+          >
+            Context changed
+          </span>
+        ) : (
+          drifted && <span title="Could not place anchor" className="not-italic">📍?</span>
+        )}
         <span className="truncate">{anchorPreview(thread)}</span>
       </div>
       {first &&

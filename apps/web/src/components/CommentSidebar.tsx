@@ -100,8 +100,10 @@ export function CommentSidebar({
     return [...threads].sort((a, b) => {
       const pa = positionsByAnchorId.get(a.id);
       const pb = positionsByAnchorId.get(b.id);
-      if (pa?.drifted && !pb?.drifted) return 1;
-      if (!pa?.drifted && pb?.drifted) return -1;
+      const da = a.contextChanged || (pa?.drifted ?? false);
+      const db = b.contextChanged || (pb?.drifted ?? false);
+      if (da && !db) return 1;
+      if (!da && db) return -1;
       const ya = pa?.y ?? Number.POSITIVE_INFINITY;
       const yb = pb?.y ?? Number.POSITIVE_INFINITY;
       if (ya !== yb) return ya - yb;
@@ -236,7 +238,7 @@ export function CommentSidebar({
               key={t.id}
               versionId={versionId}
               thread={t}
-              drifted={pos?.drifted ?? false}
+              drifted={t.contextChanged || (pos?.drifted ?? false)}
               currentUserId={currentUserId}
               onHighlight={onHighlight}
               isFocused={focusedThreadId === t.id}

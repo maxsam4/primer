@@ -16,6 +16,8 @@ interface FakeClient {
   getDocument: ReturnType<typeof vi.fn>;
   listVersions: ReturnType<typeof vi.fn>;
   getVersionThreads: ReturnType<typeof vi.fn>;
+  replyToThread: ReturnType<typeof vi.fn>;
+  resolveThread: ReturnType<typeof vi.fn>;
   getVersionContent: ReturnType<typeof vi.fn>;
   createDocument: ReturnType<typeof vi.fn>;
   addVersion: ReturnType<typeof vi.fn>;
@@ -30,6 +32,8 @@ function makeFakeClient(): FakeClient {
     getDocument: vi.fn(),
     listVersions: vi.fn(),
     getVersionThreads: vi.fn(),
+    replyToThread: vi.fn(),
+    resolveThread: vi.fn(),
     getVersionContent: vi.fn(),
     createDocument: vi.fn(),
     addVersion: vi.fn(),
@@ -636,6 +640,8 @@ describe('primer_get_comments', () => {
         {
           id: 't1',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: { type: 'text-range', selectorText: 'snippet', prefix: '', suffix: '', containerPath: 'body' },
           resolvedAt: null,
           resolvedBy: null,
@@ -669,9 +675,32 @@ describe('primer_get_comments', () => {
 
     expect(client.getVersionThreads).toHaveBeenCalledWith('v1');
     expect(result.isError).toBeFalsy();
-    const text = (result.content[0] as { type: 'text'; text: string }).text;
-    expect(text).toContain('> snippet');
-    expect(text).toContain('**Alice** — Note');
+    const out = JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+    expect(out.markdown).toContain('> snippet');
+    expect(out.markdown).toContain('**Alice** — Note');
+    expect(out.comments).toEqual([
+      {
+        thread_id: 't1',
+        comment_id: 'c1',
+        author_id: 'u1',
+        author_name: 'Alice',
+        body: 'Note',
+        created_at: '2026-06-05T10:00:00.000Z',
+        anchor_text: 'snippet',
+        version_number: 1,
+        resolved: false,
+        context_changed: false,
+      },
+    ]);
+  });
+
+  it('primer_reply_to_thread posts the reply and returns the created ids', async () => {
+    const client = makeFakeClient();
+    client.replyToThread.mockResolvedValue({ comment: { id: 'c2' }, thread: { id: 't1' } });
+    const { deps } = buildDeps({ client });
+    const result = await buildToolHandlers(deps).primer_reply_to_thread({ thread_id: 't1', body: 'Addressed in v2.' });
+    expect(client.replyToThread).toHaveBeenCalledWith('t1', 'Addressed in v2.');
+    expect(JSON.parse((result.content[0] as { type: 'text'; text: string }).text)).toEqual({ thread_id: 't1', comment_id: 'c2' });
   });
 
   it('with documentId: resolves latest via getDocument, then getVersionThreads, includes title + version in header', async () => {

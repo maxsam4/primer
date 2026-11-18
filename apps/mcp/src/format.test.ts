@@ -17,6 +17,8 @@ describe('formatComments', () => {
         {
           id: 't1',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: { ...baseAnchor, selectorText: 'the cake is a lie' },
           resolvedAt: null,
           resolvedBy: null,
@@ -50,6 +52,8 @@ describe('formatComments', () => {
         {
           id: 't2',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: { ...baseAnchor, selectorText: 'resolved selection' },
           resolvedAt: '2026-06-05T11:00:00.000Z',
           resolvedBy: 'u3',
@@ -92,6 +96,8 @@ describe('formatComments', () => {
         {
           id: 't1',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: { ...baseAnchor, selectorText: 'snippet' },
           resolvedAt: null,
           resolvedBy: null,
@@ -152,6 +158,8 @@ describe('formatComments', () => {
         {
           id: 't1',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: { ...baseAnchor, selectorText: 'x' },
           resolvedAt: null,
           resolvedBy: null,
@@ -186,6 +194,8 @@ describe('formatComments', () => {
         {
           id: 't1',
           versionId: 'v1',
+          versionNumber: 1,
+          contextChanged: false,
           anchor: {
             type: 'element-path',
             path: 'body>div',

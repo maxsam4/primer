@@ -53,8 +53,14 @@ export const versions = pgTable(
   })
 );
 
+// A thread belongs to its document. `versionId` and `anchor` record where it
+// was started (the originating version and the selection made there); where it
+// sits on each version is in `thread_placements`.
 export const threads = pgTable('threads', {
   id: uuid('id').primaryKey(),
+  documentId: uuid('document_id')
+    .notNull()
+    .references(() => documents.id, { onDelete: 'cascade' }),
   versionId: uuid('version_id')
     .notNull()
     .references(() => versions.id, { onDelete: 'cascade' }),
@@ -63,6 +69,29 @@ export const threads = pgTable('threads', {
   resolvedBy: text('resolved_by').references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Where a thread shows on a version. The originating version gets a row when
+// the thread is created; publishing a version adds a row for every open thread
+// (lib/threadCarry.ts). `anchor` is null when the quoted text could not be
+// found on that version ("context changed"): the thread still shows there, in
+// the sidebar, without a highlight.
+export const threadPlacements = pgTable(
+  'thread_placements',
+  {
+    threadId: uuid('thread_id')
+      .notNull()
+      .references(() => threads.id, { onDelete: 'cascade' }),
+    versionId: uuid('version_id')
+      .notNull()
+      .references(() => versions.id, { onDelete: 'cascade' }),
+    anchor: jsonb('anchor').$type<AnchorData>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.threadId, t.versionId] }),
+    byVersion: index('thread_placements_version_idx').on(t.versionId),
+  }),
+);
 
 export const comments = pgTable(
   'comments',

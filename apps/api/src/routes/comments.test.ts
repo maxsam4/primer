@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { insertThread } from '../testing/threads.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +38,7 @@ async function seedDocVersionThread({
     sizeBytes: 0,
     versionNote: null,
   });
-  await db.insert(threads).values({
+  await insertThread({
     id: threadId,
     versionId,
     anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },

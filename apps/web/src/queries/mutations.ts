@@ -28,8 +28,12 @@ function mergeThreadIntoCache(
   qc.setQueryData<ThreadsQueryShape>(['threads', versionId], (prev) => {
     if (!prev) return prev;
     const exists = prev.data.threads.some((t) => t.id === thread.id);
+    // Single-thread responses carry the anchor the thread was started with;
+    // keep the placement this version's list gave it.
     const threads = exists
-      ? prev.data.threads.map((t) => (t.id === thread.id ? thread : t))
+      ? prev.data.threads.map((t) =>
+          t.id === thread.id ? { ...thread, anchor: t.anchor, contextChanged: t.contextChanged } : t
+        )
       : [...prev.data.threads, thread];
     return { ...prev, data: { ...prev.data, threads } };
   });

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { insertThread } from '../testing/threads.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +23,7 @@ async function seedThreadWithComment(
 ): Promise<{ threadId: string; commentId: string }> {
   const threadId = uuidv7();
   const commentId = uuidv7();
-  await db.insert(threads).values({
+  await insertThread({
     id: threadId,
     versionId,
     anchor: { type: 'text-range', selectorText: body.slice(0, 20) },

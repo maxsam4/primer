@@ -210,8 +210,13 @@ function DocumentPageInner() {
 
   // Tombstoned threads keep their anchor registered so the "Comment deleted"
   // card in the sidebar can still highlight the passage it referred to.
+  // Threads whose text isn't on this version ("context changed") have no
+  // anchor here.
   const anchorsForCompanion = useMemo(
-    () => threads.filter(hasAnyComments).map((t) => ({ id: t.id, data: t.anchor })),
+    () =>
+      threads
+        .filter((t) => hasAnyComments(t) && !t.contextChanged)
+        .map((t) => ({ id: t.id, data: t.anchor })),
     [threads]
   );
 

@@ -2,10 +2,11 @@ import type { Hono } from 'hono';
 import { v7 as uuidv7 } from 'uuid';
 import { eq, sql } from 'drizzle-orm';
 import type { AppVariables, AppDeps } from '../app.ts';
+import type { Notifier } from '../notifications/notifier.ts';
 import { logger } from '../logger.ts';
 import type { CommentBodyRequest, CommentDTO, ThreadDTO } from '@polygonlabs/primer-api-types';
 import { COMMENT_UNDO_WINDOW_MS } from '@polygonlabs/primer-api-types';
-import { threads, comments, users } from '../db/schema.ts';
+import { threads, versions, comments, users } from '../db/schema.ts';
 import { db } from '../db/client.ts';
 import { validateAndCleanMentions } from '../notifications/mentions.ts';
 import {
@@ -71,6 +72,7 @@ function validateBody(raw: unknown): { ok: true; body: string } | { ok: false } 
 interface ThreadRow {
   id: string;
   versionId: string;
+  versionNumber: number;
   anchor: unknown;
   resolvedAt: Date | null;
   resolvedBy: string | null;
@@ -131,6 +133,7 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
     .select({
       id: threads.id,
       versionId: threads.versionId,
+      versionNumber: versions.versionNumber,
       anchor: threads.anchor,
       resolvedAt: threads.resolvedAt,
       resolvedBy: threads.resolvedBy,
@@ -138,6 +141,7 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
       createdAt: threads.createdAt,
     })
     .from(threads)
+    .innerJoin(versions, eq(versions.id, threads.versionId))
     .leftJoin(users, eq(users.id, threads.resolvedBy))
     .where(eq(threads.id, threadId))) as ThreadRow[];
   if (!row) return null;
@@ -162,7 +166,9 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
   return {
     id: row.id,
     versionId: row.versionId,
+    versionNumber: row.versionNumber,
     anchor: row.anchor as ThreadDTO['anchor'],
+    contextChanged: false,
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
     resolvedBy: row.resolvedBy,
     resolvedByDisplayName: row.resolvedByDisplayName,
@@ -171,115 +177,129 @@ async function loadThreadDTO(threadId: string): Promise<ThreadDTO | null> {
   };
 }
 
+export type ReplyResult =
+  | { ok: true; comment: CommentDTO; thread: ThreadDTO }
+  | { ok: false; status: 400 | 404; error: string; message?: string };
+
+/** Posts a reply to a thread as `user` (reopening it if resolved) and notifies
+ *  participants. Shared by the REST route and the MCP reply tool. */
+export async function replyToThread(
+  notifier: Notifier,
+  user: { id: string },
+  threadId: string,
+  payload: { body?: unknown; mentions?: unknown },
+): Promise<ReplyResult> {
+  const ctx = await loadDocContextForThread(threadId);
+  if (!ctx.ok) return { ok: false, status: 404, error: 'not_found' };
+  const collabRole = await loadCollaboratorRole(ctx.docId, user.id);
+  const eff = effectiveRole(ctx, user.id, collabRole);
+  if (!canComment(ctx.visibility, eff)) return { ok: false, status: 404, error: 'not_found' };
+
+  const validation = validateBody(payload.body);
+  if (!validation.ok) {
+    return { ok: false, status: 400, error: 'invalid_body', message: `Body must be 1–${MAX_BODY} chars after trim.` };
+  }
+
+  // Load thread context (existence check + doc/version info for notifier).
+  const [threadCtx] = (await db.execute(sql`
+    SELECT d.id AS doc_id, d.title AS doc_title,
+           d.uploader_id AS uploader_id,
+           v.id AS version_id, v.version_number::int AS version_number
+    FROM threads t
+    INNER JOIN versions v ON v.id = t.version_id
+    INNER JOIN documents d ON d.id = v.document_id
+    WHERE t.id = ${threadId}
+    LIMIT 1
+  `)) as unknown as Array<{
+    doc_id: string;
+    doc_title: string;
+    uploader_id: string;
+    version_id: string;
+    version_number: number;
+  }>;
+  if (!threadCtx) {
+    return { ok: false, status: 404, error: 'not_found', message: 'thread not found' };
+  }
+
+  // Validate mentions before touching the DB.
+  const rawMentions = (payload as { mentions?: unknown }).mentions;
+  let validated;
+  if (rawMentions === undefined || (Array.isArray(rawMentions) && rawMentions.length === 0)) {
+    validated = { ok: true as const, mentions: [] };
+  } else {
+    const userRows = await db.select({ id: users.id }).from(users);
+    const knownUserIds = new Set(userRows.map((r) => r.id));
+    validated = validateAndCleanMentions(rawMentions as string[], user.id, knownUserIds);
+  }
+  if (!validated.ok) {
+    return { ok: false, status: 400, error: validated.error, message: validated.message };
+  }
+  const cleanedMentions = validated.mentions;
+
+  const commentId = uuidv7();
+  const insertedAt = new Date();
+
+  // Prior thread participants (only non-deleted comments).
+  const priorRows = (await db.execute(sql`
+    SELECT DISTINCT author_id AS author_id
+    FROM comments
+    WHERE thread_id = ${threadId}
+      AND deleted_at IS NULL
+  `)) as unknown as Array<{ author_id: string }>;
+
+  const mentionSet = new Set(cleanedMentions);
+  const participantUserIds = priorRows
+    .map((r) => r.author_id)
+    .filter((id) => id !== user.id && !mentionSet.has(id));
+
+  await db.transaction(async (tx) => {
+    await tx.insert(comments).values({
+      id: commentId,
+      threadId,
+      authorId: user.id,
+      body: validation.body,
+      mentions: cleanedMentions,
+    });
+    // Auto-reopen if resolved (no-op when not resolved).
+    await tx
+      .update(threads)
+      .set({ resolvedAt: null, resolvedBy: null })
+      .where(eq(threads.id, threadId));
+  });
+
+  void notifier
+    .notifyComment({
+      doc: { id: threadCtx.doc_id, title: threadCtx.doc_title },
+      version: { id: threadCtx.version_id, versionNumber: threadCtx.version_number },
+      thread: { id: threadId },
+      comment: { id: commentId, body: validation.body, createdAt: insertedAt },
+      mentionedUserIds: cleanedMentions,
+      participantUserIds,
+      uploaderUserId: threadCtx.uploader_id,
+      actorUserId: user.id,
+    })
+    .catch((err) => logger.error({ err, commentId }, 'notifier failed'));
+
+  const dto = await loadThreadDTO(threadId);
+  if (!dto) return { ok: false, status: 404, error: 'not_found' };
+  const newComment = dto.comments.find((cm) => cm.id === commentId)!;
+  return { ok: true, comment: newComment, thread: dto };
+}
+
 export function registerCommentRoutes(
   app: Hono<{ Variables: AppVariables }>,
   deps: AppDeps
 ): void {
   app.post('/api/threads/:threadId/comments', async (c) => {
-    const threadId = c.req.param('threadId');
-
-    const ctx = await loadDocContextForThread(threadId);
-    if (!ctx.ok) return c.json({ error: 'not_found' }, 404);
-    const user = c.get('user');
-    const collabRole = await loadCollaboratorRole(ctx.docId, user.id);
-    const eff = effectiveRole(ctx, user.id, collabRole);
-    if (!canComment(ctx.visibility, eff)) return c.json({ error: 'not_found' }, 404);
-
     let payload: Partial<CommentBodyRequest>;
     try {
       payload = (await c.req.json()) as Partial<CommentBodyRequest>;
     } catch {
       return c.json({ error: 'invalid_body', message: 'JSON parse failed' }, 400);
     }
-    const validation = validateBody(payload.body);
-    if (!validation.ok) {
-      return c.json({ error: 'invalid_body', message: `Body must be 1–${MAX_BODY} chars after trim.` }, 400);
-    }
-
-    // Load thread context (existence check + doc/version info for notifier).
-    const [threadCtx] = (await db.execute(sql`
-      SELECT d.id AS doc_id, d.title AS doc_title,
-             d.uploader_id AS uploader_id,
-             v.id AS version_id, v.version_number::int AS version_number
-      FROM threads t
-      INNER JOIN versions v ON v.id = t.version_id
-      INNER JOIN documents d ON d.id = v.document_id
-      WHERE t.id = ${threadId}
-      LIMIT 1
-    `)) as unknown as Array<{
-      doc_id: string;
-      doc_title: string;
-      uploader_id: string;
-      version_id: string;
-      version_number: number;
-    }>;
-    if (!threadCtx) {
-      return c.json({ error: 'not_found', message: 'thread not found' }, 404);
-    }
-
-    // Validate mentions before touching the DB.
-    const rawMentions = (payload as { mentions?: unknown }).mentions;
-    let validated;
-    if (rawMentions === undefined || (Array.isArray(rawMentions) && rawMentions.length === 0)) {
-      validated = { ok: true as const, mentions: [] };
-    } else {
-      const userRows = await db.select({ id: users.id }).from(users);
-      const knownUserIds = new Set(userRows.map((r) => r.id));
-      validated = validateAndCleanMentions(rawMentions as string[], user.id, knownUserIds);
-    }
-    if (!validated.ok) {
-      return c.json({ error: validated.error, message: validated.message }, 400);
-    }
-    const cleanedMentions = validated.mentions;
-
-    const commentId = uuidv7();
-    const insertedAt = new Date();
-
-    // Prior thread participants (only non-deleted comments).
-    const priorRows = (await db.execute(sql`
-      SELECT DISTINCT author_id AS author_id
-      FROM comments
-      WHERE thread_id = ${threadId}
-        AND deleted_at IS NULL
-    `)) as unknown as Array<{ author_id: string }>;
-
-    const mentionSet = new Set(cleanedMentions);
-    const participantUserIds = priorRows
-      .map((r) => r.author_id)
-      .filter((id) => id !== user.id && !mentionSet.has(id));
-
-    await db.transaction(async (tx) => {
-      await tx.insert(comments).values({
-        id: commentId,
-        threadId,
-        authorId: user.id,
-        body: validation.body,
-        mentions: cleanedMentions,
-      });
-      // Auto-reopen if resolved (no-op when not resolved).
-      await tx
-        .update(threads)
-        .set({ resolvedAt: null, resolvedBy: null })
-        .where(eq(threads.id, threadId));
-    });
-
-    void deps.notifier
-      .notifyComment({
-        doc: { id: threadCtx.doc_id, title: threadCtx.doc_title },
-        version: { id: threadCtx.version_id, versionNumber: threadCtx.version_number },
-        thread: { id: threadId },
-        comment: { id: commentId, body: validation.body, createdAt: insertedAt },
-        mentionedUserIds: cleanedMentions,
-        participantUserIds,
-        uploaderUserId: threadCtx.uploader_id,
-        actorUserId: user.id,
-      })
-      .catch((err) => logger.error({ err, commentId }, 'notifier failed'));
-
-    const dto = await loadThreadDTO(threadId);
-    if (!dto) return c.json({ error: 'not_found' }, 404);
-    const newComment = dto.comments.find((cm) => cm.id === commentId)!;
-    return c.json({ comment: newComment, thread: dto }, 201);
+    const out = await replyToThread(deps.notifier, c.get('user'), c.req.param('threadId'), payload);
+    if (!out.ok) return c.json({ error: out.error, message: out.message }, out.status);
+    return c.json({ comment: out.comment, thread: out.thread }, 201);
   });
 
   app.patch('/api/comments/:commentId', async (c) => {

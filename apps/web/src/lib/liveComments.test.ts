@@ -21,7 +21,9 @@ function thread(over: Partial<ThreadDTO> = {}): ThreadDTO {
   return {
     id: 't-' + Math.random().toString(36).slice(2, 8),
     versionId: 'v-1',
+    versionNumber: 1,
     anchor: { type: 'text-range', selectorText: 'x', prefix: '', suffix: '', containerPath: 'body' },
+    contextChanged: false,
     resolvedAt: null,
     resolvedBy: null,
     resolvedByDisplayName: null,
