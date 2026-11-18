@@ -5,6 +5,7 @@ import type { AppVariables, AppDeps } from '../app.ts';
 import type { DocumentDetailResponse, DocumentDetail, AddVersionResponse, DocumentSummary } from '@polygonlabs/primer-api-types';
 import { documents, versions, users } from '../db/schema.ts';
 import { db } from '../db/client.ts';
+import { transactionWithEvents } from '../lib/events.ts';
 import { logger } from '../logger.ts';
 import { validateUpload } from '../upload/validate.ts';
 import { transformHtml } from '../upload/htmlPipeline.ts';
@@ -451,7 +452,8 @@ export function registerDocumentRoutes(
     await deps.storage.put(storageKey, transformedBytes);
 
     try {
-      await db.transaction(async (tx) => {
+      const actorId = c.get('user').id;
+      await transactionWithEvents(async (tx, emit) => {
         await tx.insert(versions).values({
           id: versionId,
           documentId: docId,
@@ -461,6 +463,13 @@ export function registerDocumentRoutes(
           versionNote,
         });
         await carryOpenThreads(tx, deps.storage, { documentId: docId, versionId, html: transformed.html });
+        emit({
+          documentId: docId,
+          versionId: versionId,
+          actorId: actorId,
+          type: 'version.published',
+          payload: { document_id: docId, version_id: versionId, number: nextNumber, author_id: actorId },
+        });
       });
     } catch (err) {
       try { await deps.storage.delete(storageKey); } catch {}

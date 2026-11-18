@@ -582,12 +582,21 @@ export function isEventAudience(v: unknown): v is EventAudience {
   return v === 'author' || v === 'collaborators' || v === 'artifact';
 }
 
+/** The audience a stored row can carry. `readers` is server-only: Primer's
+ *  own lifecycle events (namespace `primer`) use it, and it means everyone
+ *  who may read the document. No writer can choose it, and the page never
+ *  relays it into the artifact. */
+export type StoredEventAudience = EventAudience | 'readers';
+
 /** `namespace` is hierarchical: `/`-separated lowercase kebab segments
  *  (`example`, `example/telemetry`). Namespace MEANING is the consumers' domain —
  *  the server validates shape only and never infers behavior from it. */
 export const EVENT_NAMESPACE_RE = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
 /** `type` is a single name within a namespace (`export`, `verdict`). */
 export const EVENT_TYPE_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** A `?type=` filter also matches Primer's own dotted lifecycle types
+ *  (`comment.created`), which writers can never use. */
+export const EVENT_TYPE_FILTER_RE = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$/;
 export const MAX_EVENT_NAMESPACE_LENGTH = 128;
 export const MAX_EVENT_TYPE_LENGTH = 64;
 /** Serialized (UTF-8) size cap per event payload. */
@@ -608,18 +617,16 @@ export interface EventInput {
 }
 
 /** A stored event row. `id` is the server-assigned ordering key — a positive
- *  integer (bigserial), NOT a uuid. Ids are strictly increasing in insertion
- *  order within a batch, but assignment order is not commit order across
- *  concurrent writers: consumers dedupe by `id` and overlap re-read rather
- *  than treating any single fetch as gap-free. `createdAt` is display-only
- *  and carries no ordering guarantee. `versionId` is present only when the
- *  writer declared it. */
+ *  integer (bigserial), NOT a uuid. Ids follow commit order: a row only ever
+ *  becomes visible after every row with a lower id, so "everything after id
+ *  N" is a complete resume point. Ids need not be contiguous. `createdAt` is
+ *  display-only. `versionId` is present only when the writer declared it. */
 export interface EventRowDTO {
   id: number;
   documentId: string;
   versionId?: string;
   authorId: string;
-  audience: EventAudience;
+  audience: StoredEventAudience;
   namespace: string;
   type: string;
   payload: unknown;
@@ -655,4 +662,82 @@ export interface EventsListResponse {
  *  id space. */
 export interface UserLookupResponse {
   id: string;
+}
+
+// ───────────────────── Lifecycle events (server-only) ─────────────────────
+// Primer writes these itself, in the same transaction as the change they
+// describe. Rows carry namespace `primer`, audience `readers`, and one of the
+// types below; the full event name is `primer.<type>` (for example
+// `primer.comment.created`). Clients can never write the `primer` namespace.
+// Payloads hold ids only — fetch the comment, thread or version for content.
+
+export const PRIMER_EVENT_NAMESPACE = 'primer';
+
+export interface PrimerCommentCreatedPayload {
+  document_id: string;
+  version_id: string;
+  thread_id: string;
+  comment_id: string;
+  author_id: string;
+}
+
+export interface PrimerThreadResolvedPayload {
+  document_id: string;
+  thread_id: string;
+  by: string;
+}
+
+/** A thread changed in a way other events don't name: a comment edited,
+ *  deleted or restored, or the thread reopened. */
+export interface PrimerThreadUpdatedPayload {
+  document_id: string;
+  thread_id: string;
+  by: string;
+}
+
+export interface PrimerVersionPublishedPayload {
+  document_id: string;
+  version_id: string;
+  number: number;
+  author_id: string;
+}
+
+export type DocumentStatusState = 'working' | 'idle';
+
+/** How long a `working` status counts before it expires unless refreshed. */
+export const DOCUMENT_STATUS_TTL_MS = 10 * 60 * 1000;
+
+export interface PrimerStatusPayload {
+  document_id: string;
+  state: DocumentStatusState;
+  by: string;
+  expires_at: string; // ISO
+}
+
+export interface PrimerEventPayloads {
+  'comment.created': PrimerCommentCreatedPayload;
+  'thread.resolved': PrimerThreadResolvedPayload;
+  'thread.updated': PrimerThreadUpdatedPayload;
+  'version.published': PrimerVersionPublishedPayload;
+  status: PrimerStatusPayload;
+}
+
+export type PrimerEventType = keyof PrimerEventPayloads;
+
+/** POST /api/documents/:id/status */
+export interface SetDocumentStatusRequest {
+  state: DocumentStatusState;
+}
+
+/** One person currently working on a document (an unexpired `working`). */
+export interface DocumentStatusDTO {
+  by: string;
+  displayName: string;
+  state: 'working';
+  expiresAt: string; // ISO
+}
+
+/** GET /api/documents/:id/status — who is working on the document now. */
+export interface DocumentStatusResponse {
+  statuses: DocumentStatusDTO[];
 }

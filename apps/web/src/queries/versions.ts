@@ -7,17 +7,15 @@ import type {
   VersionsListResponse,
 } from '@polygonlabs/primer-api-types';
 import { api } from '../lib/fetch.ts';
-import { becameVisible, VERSIONS_POLL_INTERVAL_MS } from '../lib/versionsPolling.ts';
+import { becameVisible } from '../lib/visibility.ts';
 
 /**
- * Keeps the version list (and therefore the version switcher) live for a
- * reader who leaves the document open across a new publish — see
- * lib/versionsPolling.ts for why this polls instead of reacting to a push
- * from the server. Never changes which version is being VIEWED; the page
- * latches that per navigation (lib/viewedVersion.ts) regardless of what this
- * fetch returns. Polling pauses while the tab is hidden
- * (refetchIntervalInBackground: false); the listener below refreshes the
- * moment it becomes visible again instead of waiting out the interval.
+ * The document's version list (and therefore the version switcher). The
+ * document page refreshes it when a `primer.version.published` event
+ * arrives on the document's event stream (routes/document.tsx); the
+ * listener below catches up the moment the tab becomes visible again. This
+ * fetch never changes which version is being VIEWED; the page latches that
+ * per navigation (lib/viewedVersion.ts).
  */
 export function useVersionsQuery(docId: string) {
   const qc = useQueryClient();
@@ -49,8 +47,6 @@ export function useVersionsQuery(docId: string) {
     },
     enabled: docId.length > 0,
     staleTime: 30_000,
-    refetchInterval: VERSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: false,
   });
 }
 

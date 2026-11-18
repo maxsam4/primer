@@ -47,7 +47,7 @@ Published: <url>
 
 ## 4. Iterate
 
-When the user revises the artifact, regenerate the content and call `primer_add_version` with a concise `versionNote` describing what changed (e.g. `"fixed Y-axis scale"`, `"addressed reviewer Q on assumptions"`). If you have `.primer/document.json`, update it with the new version id.
+While you revise a document others are reading, call `primer_set_status` with `state: "working"` (again every few minutes on long work) so they see you are on it, and `state: "idle"` once you publish or stop. When the user revises the artifact, regenerate the content and call `primer_add_version` with a concise `versionNote` describing what changed (e.g. `"fixed Y-axis scale"`, `"addressed reviewer Q on assumptions"`). If you have `.primer/document.json`, update it with the new version id.
 
 ## 5. Gather feedback
 

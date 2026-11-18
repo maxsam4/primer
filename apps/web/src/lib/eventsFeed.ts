@@ -12,14 +12,9 @@
  *  - every stream event carries an SSE `id:` equal to the row id, so
  *    EventSource's native reconnect resumes via Last-Event-ID;
  *  - on reconnect-after-error and on page-visibility regain — or any doubt
- *    — we re-hydrate the FULL visible list (the "fetch the full filtered
- *    set" arm of the ordering contract) and re-relay anything missed. A
- *    fixed overlap window would silently skip a row that committed more
- *    than the window below the frontier while we were disconnected; the
- *    contract says never silently skipped, unconditionally, so the refresh
- *    is unconditional too. The seen-set makes re-hydrates cheap to relay
- *    (only unseen rows dispatch) and the pagination keeps them a handful of
- *    sequential reads even at hundreds of events;
+ *    — we re-read everything after the highest id seen and re-relay
+ *    anything missed. Ids follow commit order, so that read is complete:
+ *    no row can commit below an id already seen;
  *  - duplicates and overlaps are legal by design (this module suppresses
  *    them by id as a courtesy; artifact code must dedupe by id anyway).
  *
@@ -30,7 +25,7 @@
  * DI-friendly by construction (fetch, EventSource, and timers injected) so
  * the whole engine is testable without a browser.
  */
-import type { EventRowDTO, EventsListResponse } from '@polygonlabs/primer-api-types';
+import { PRIMER_EVENT_NAMESPACE, type EventRowDTO, type EventsListResponse } from '@polygonlabs/primer-api-types';
 
 /** Minimal slice of EventSource this engine needs. */
 export interface EventSourceLike {
@@ -44,6 +39,13 @@ export interface EventsFeedOptions {
   documentId: string;
   /** Receives coalesced batches of `artifact`-audience rows, ascending id. */
   onBatch: (rows: EventRowDTO[]) => void;
+  /** Receives Primer's own lifecycle rows (namespace `primer`: comments,
+   *  threads, versions, working status) as the stream delivers them. They
+   *  are page notifications and are never relayed into the artifact. */
+  onDocChange?: (row: EventRowDTO) => void;
+  /** Called after every re-hydrate (reconnect, visibility regain): anything
+   *  the page shows may have changed while the stream was down. */
+  onResync?: () => void;
   /** Same-origin fetch (cookie-authed); inject `api` from lib/fetch.ts. */
   fetchImpl: (url: string) => Promise<Response>;
   /** EventSource factory; inject `(url) => new EventSource(url)`. */
@@ -85,6 +87,8 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
   const {
     documentId,
     onBatch,
+    onDocChange,
+    onResync,
     fetchImpl,
     eventSourceFactory,
     coalesceMs = DEFAULT_COALESCE_MS,
@@ -154,17 +158,14 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
 
   async function refresh(): Promise<void> {
     if (stopped) return;
-    // FULL re-hydrate — no since, no window. While disconnected (or
-    // suspended without a recorded error), a late-committing row can land
-    // arbitrarily far below the highest id we've seen; any bounded overlap
-    // window would silently skip it, and the ordering contract forbids
-    // that unconditionally. The seen-set dedupe means only genuinely
-    // missed rows produce a dispatch.
+    // Everything after the highest id seen: ids follow commit order, so
+    // nothing missed while disconnected can sit below it.
     try {
-      await hydrate(null);
+      await hydrate(highestSeen);
     } catch {
       // Best-effort: the stream (or the next refresh) will catch us up.
     }
+    if (!stopped) onResync?.();
   }
 
   function subscribe(): void {
@@ -181,6 +182,7 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
         return;
       }
       if (typeof row?.id !== 'number') return;
+      if (row.namespace === PRIMER_EVENT_NAMESPACE) onDocChange?.(row);
       pending.push(row);
       scheduleFlush();
     };
@@ -208,6 +210,8 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
       }
       hydrated = true;
       subscribe();
+      // Whatever the page fetched before this point may already be stale.
+      onResync?.();
     },
     stop(): void {
       stopped = true;

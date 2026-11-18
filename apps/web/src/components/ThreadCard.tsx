@@ -14,6 +14,7 @@ import { useMentionableUsers } from '../queries/users.ts';
 import { commentRowModels } from '../lib/commentRows.ts';
 import { useBottomSheet } from './BottomSheet.tsx';
 import { describeApiError } from '../lib/apiError.ts';
+import { useReportDraft } from '../lib/drafts.ts';
 
 interface Props {
   versionId: string;
@@ -183,6 +184,7 @@ function CommentRow({
   const del = useDeleteComment(versionId, comment.id);
   const usersQ = useMentionableUsers();
   const canShowAuthorActions = !editing && !confirmingDelete && isAuthor;
+  useReportDraft(editing && draft.trim() !== comment.body.trim());
 
   function startEditing() {
     setEditing(true);
@@ -297,6 +299,7 @@ export function ThreadCard({ versionId, thread, drifted, currentUserId, onHighli
   const [replying, setReplying] = useState(false);
   const [replyDraft, setReplyDraft] = useState('');
   const [replyMentions, setReplyMentions] = useState<string[]>([]);
+  useReportDraft(replying && replyDraft.trim().length > 0);
   const reply = useReply(versionId, thread.id);
   const resolve = useResolveThread(versionId, thread.id);
   const reopen = useReopenThread(versionId, thread.id);

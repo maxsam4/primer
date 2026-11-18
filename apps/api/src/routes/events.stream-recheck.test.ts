@@ -299,6 +299,26 @@ describe('event stream re-check: a slow check never re-grants access mid-batch',
     }
   }, 15000);
 
+  it('a commit on another document never wakes the stream', async () => {
+    await withApp(async (app) => {
+      const docA = await privateDocWithReader(app);
+      const docB = await privateDocWithReader(app);
+      const res = await app.request(`/api/documents/${docB}/events/stream`, { headers: asUser(READER) });
+      const stream = readStream(res);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const afterConnect = gateControl.calls.get(READER) ?? 0;
+
+      await ownerPosts(app, docA, 5);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect((gateControl.calls.get(READER) ?? 0) - afterConnect).toBe(0);
+
+      const ids = await ownerPosts(app, docB, 1);
+      expect(await stream.waitForIds(ids)).toBe('done');
+      await stream.close();
+      expect((gateControl.calls.get(READER) ?? 0) - afterConnect).toBe(1);
+    });
+  });
+
   it('one multi-row POST costs one access check per open stream', async () => {
     await withApp(async (app) => {
       const documentId = await privateDocWithReader(app);

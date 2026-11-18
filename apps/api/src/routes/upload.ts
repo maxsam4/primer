@@ -7,6 +7,7 @@ import { validateUpload } from '../upload/validate.ts';
 import { transformHtml } from '../upload/htmlPipeline.ts';
 import { markdownToHtml } from '../upload/markdown.ts';
 import { db } from '../db/client.ts';
+import { transactionWithEvents } from '../lib/events.ts';
 import { logger } from '../logger.ts';
 
 export function registerUploadRoute(
@@ -83,7 +84,7 @@ export function registerUploadRoute(
     await deps.storage.put(storageKey, transformedBytes);
 
     try {
-      await db.transaction(async (tx) => {
+      await transactionWithEvents(async (tx, emit) => {
         await tx.insert(documents).values({
           id: documentId,
           title: validated.title,
@@ -97,6 +98,13 @@ export function registerUploadRoute(
           storageKey,
           sizeBytes: transformedBytes.byteLength,
           versionNote: null,
+        });
+        emit({
+          documentId: documentId,
+          versionId: versionId,
+          actorId: c.get('user').id,
+          type: 'version.published',
+          payload: { document_id: documentId, version_id: versionId, number: 1, author_id: c.get('user').id },
         });
       });
     } catch (err) {

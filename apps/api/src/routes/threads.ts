@@ -8,6 +8,7 @@ import { logger } from '../logger.ts';
 import type { CommentDTO, CreateThreadRequest, ThreadDTO, ThreadsListResponse } from '@polygonlabs/primer-api-types';
 import { threads, threadPlacements, versions, comments, users } from '../db/schema.ts';
 import { db } from '../db/client.ts';
+import { transactionWithEvents } from '../lib/events.ts';
 import { validateAndCleanMentions } from '../notifications/mentions.ts';
 import type { Visibility } from '../lib/permissions.ts';
 import { effectiveRole, canRead, canComment, loadCollaboratorRole } from '../lib/permissions.ts';
@@ -212,10 +213,18 @@ export async function resolveThread(user: { id: string }, threadId: string): Pro
   if (authz === 'not_found') return { ok: false, status: 404, error: 'not_found' };
   if (authz === 'forbidden') return { ok: false, status: 403, error: 'forbidden' };
 
-  await db
-    .update(threads)
-    .set({ resolvedAt: new Date(), resolvedBy: user.id })
-    .where(eq(threads.id, threadId));
+  await transactionWithEvents(async (tx, emit) => {
+    await tx
+      .update(threads)
+      .set({ resolvedAt: new Date(), resolvedBy: user.id })
+      .where(eq(threads.id, threadId));
+    emit({
+      documentId: ctx.docId,
+      actorId: user.id,
+      type: 'thread.resolved',
+      payload: { document_id: ctx.docId, thread_id: threadId, by: user.id },
+    });
+  });
   const dto = await loadThreadDTO(threadId);
   if (!dto) return { ok: false, status: 404, error: 'not_found' };
   return { ok: true, thread: dto };
@@ -389,7 +398,7 @@ export function registerThreadRoutes(
     const commentId = uuidv7();
     const insertedAt = new Date();
 
-    await db.transaction(async (tx) => {
+    await transactionWithEvents(async (tx, emit) => {
       await tx.insert(threads).values({
         id: threadId,
         documentId: latestRow.doc_id,
@@ -403,6 +412,19 @@ export function registerThreadRoutes(
         authorId: user.id,
         body: bodyValidation.body,
         mentions: cleanedMentions,
+      });
+      emit({
+        documentId: latestRow.doc_id,
+        versionId,
+        actorId: user.id,
+        type: 'comment.created',
+        payload: {
+          document_id: latestRow.doc_id,
+          version_id: versionId,
+          thread_id: threadId,
+          comment_id: commentId,
+          author_id: user.id,
+        },
       });
     });
 
@@ -444,10 +466,18 @@ export function registerThreadRoutes(
     if (authz === 'not_found') return c.json({ error: 'not_found' }, 404);
     if (authz === 'forbidden') return c.json({ error: 'forbidden' }, 403);
 
-    await db
-      .update(threads)
-      .set({ resolvedAt: null, resolvedBy: null })
-      .where(eq(threads.id, threadId));
+    await transactionWithEvents(async (tx, emit) => {
+      await tx
+        .update(threads)
+        .set({ resolvedAt: null, resolvedBy: null })
+        .where(eq(threads.id, threadId));
+      emit({
+        documentId: ctx.docId,
+        actorId: user.id,
+        type: 'thread.updated',
+        payload: { document_id: ctx.docId, thread_id: threadId, by: user.id },
+      });
+    });
     const dto = await loadThreadDTO(threadId);
     if (!dto) return c.json({ error: 'not_found' }, 404);
     return c.json(dto, 200);

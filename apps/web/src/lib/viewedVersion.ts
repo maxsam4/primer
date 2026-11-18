@@ -3,14 +3,14 @@
  * thread or reply posts to.
  *
  * /d/:docId has no version in the URL, so it means "the latest version as of
- * when I opened this". The version list now refreshes while the page is open
- * (see versionsPolling.ts), and resolving "latest" on every refresh would
+ * when I opened this". The version list refreshes while the page is open
+ * (a version.published event), and resolving "latest" on every refresh would
  * swap the iframe, the threads and the post target out from under a reader
  * mid-comment: a comment anchored on v4's text would be filed on v5. So the
  * page latches the version it resolved on first load and keeps it for that
  * navigation; only a new navigation (a new router location key — the
- * switcher, the "switch to latest" buttons, a link) re-resolves it. A newer
- * version that appears meanwhile only updates the switcher and the notice.
+ * switcher, the "switch to latest" buttons, a link, or followNewVersion
+ * below) re-resolves it.
  *
  * Pure so the policy is unit-testable without rendering the page.
  */
@@ -76,4 +76,15 @@ export function composerPendingFrom<A>(params: {
   if (pendingSelection) return { anchor: pendingSelection.anchor, origin: 'selection' };
   if (pendingPick) return { anchor: pendingPick.anchor, origin: 'pick' };
   return null;
+}
+
+/** Whether a newly published version should replace the view in place.
+ *  Only on /d/:docId (a URL naming a version is a deliberate pin), and only
+ *  while the reader has no unsent comment, reply or edit: a draft keeps the
+ *  page on its version and the "newer version" notice shows instead. */
+export function followNewVersion(params: {
+  requestedNumber: number | undefined;
+  hasUnsentDraft: boolean;
+}): boolean {
+  return params.requestedNumber === undefined && !params.hasUnsentDraft;
 }

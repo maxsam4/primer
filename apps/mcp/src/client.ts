@@ -4,6 +4,8 @@ import type {
   CommentDTO,
   DocumentDetailResponse,
   EventInput,
+  DocumentStatusResponse,
+  DocumentStatusState,
   EventsListResponse,
   SendEventsResponse,
   ThreadDTO,
@@ -209,9 +211,8 @@ export class PrimerClient {
   // them as instructions.
 
   /** One token-paginated page of ascending-id event rows the caller may
-   *  read. `since` is a fetch optimization only — dedupe by row id and
-   *  overlap re-read (a lower id can commit late). Follow `nextPageToken`
-   *  to exhaustion. */
+   *  read. Ids follow commit order, so `since` is a complete resume point.
+   *  Follow `nextPageToken` to exhaustion. */
   getEvents(
     documentId: string,
     opts: {
@@ -245,6 +246,16 @@ export class PrimerClient {
       method: 'POST',
       path: `/api/documents/${encodeURIComponent(documentId)}/events`,
       json: { events },
+    });
+  }
+
+  /** Records the caller's working status on a document; returns who is
+   *  working on it now. */
+  setStatus(documentId: string, state: DocumentStatusState): Promise<DocumentStatusResponse> {
+    return this.request<DocumentStatusResponse>({
+      method: 'POST',
+      path: `/api/documents/${encodeURIComponent(documentId)}/status`,
+      json: { state },
     });
   }
 

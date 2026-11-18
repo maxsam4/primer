@@ -127,7 +127,7 @@ export const events = pgTable(
   {
     // The ordering key: a positive integer (bigserial), deliberately NOT a
     // uuid — list and stream deliver ascending id, and consumers dedupe by
-    // it. Assignment order is not commit order; see routes/events.ts.
+    // it. Ids follow commit order; see lib/events.ts (EVENT_ORDER_LOCK_KEY).
     id: bigserial('id', { mode: 'number' }).primaryKey(),
     documentId: uuid('document_id')
       .notNull()

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { becameVisible } from './versionsPolling.ts';
+import { becameVisible } from './visibility.ts';
 
 describe('becameVisible', () => {
   it('is true on the hidden → visible transition', () => {

@@ -13,7 +13,7 @@ import { createApp } from '../app.ts';
 import { FilesystemStorage } from '../storage/filesystem.ts';
 import { mockMultiResolver } from '../auth/resolver.ts';
 import { db } from '../db/client.ts';
-import { documents, documentCollaborators, users, versions } from '../db/schema.ts';
+import { documents, documentCollaborators, events, users, versions } from '../db/schema.ts';
 import type { Notifier } from '../notifications/notifier.ts';
 import type {
   CollaboratorRole,
@@ -23,7 +23,6 @@ import type {
 } from '@polygonlabs/primer-api-types';
 import { asUser, asUserJson } from '../test/harness.ts';
 import { uploadFixture } from './upload.testlib.ts';
-import { publishDocEvents } from '../lib/events.ts';
 
 class NullNotifier implements Notifier {
   readonly emailEnabled = false;
@@ -103,6 +102,15 @@ async function listAll(
   return (await res.json()) as EventsListResponse;
 }
 
+/** Uploads a document and drops the `primer.version.published` row its
+ *  creation wrote, so these tests see only the client-written channel
+ *  (lifecycle rows are covered in events.lifecycle.test.ts). */
+async function uploadDoc(app: ReturnType<typeof createApp>) {
+  const upload = await uploadFixture(app);
+  await db.delete(events).where(eq(events.documentId, upload.documentId));
+  return upload;
+}
+
 const ev = (over: Record<string, unknown> = {}) => ({
   namespace: 'padd',
   type: 'export',
@@ -114,7 +122,7 @@ const ev = (over: Record<string, unknown> = {}) => ({
 describe('POST /api/documents/:id/events — batch write', () => {
   it('201: inserts in array order with strictly increasing integer ids, echoing audience', async () => {
     await withApp(async (app) => {
-      const { documentId, versionId } = await uploadFixture(app);
+      const { documentId, versionId } = await uploadDoc(app);
       const { status, body } = await postEvents(app, documentId, OWNER, [
         ev({ type: 'export', payload: { n: 1 }, versionId }),
         ev({ type: 'verdict', payload: { n: 2 }, audience: 'collaborators' }),
@@ -142,7 +150,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('atomic visibility: all rows of a batch appear together in a list read', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await postEvents(app, documentId, OWNER, [ev(), ev(), ev()]);
       const list = await listAll(app, documentId, OWNER);
       expect(list.events).toHaveLength(3);
@@ -153,7 +161,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('all-or-nothing: one invalid event rejects the whole batch, nothing inserted', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const res = await app.request(`/api/documents/${documentId}/events`, {
         method: 'POST',
         headers: asUserJson(OWNER),
@@ -171,7 +179,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('rejects a missing/invalid audience, namespace, or type (audience has no default)', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       for (const bad of [
         ev({ audience: undefined }),
         ev({ audience: 'everyone' }),
@@ -180,6 +188,10 @@ describe('POST /api/documents/:id/events — batch write', () => {
         ev({ namespace: '/padd' }),
         ev({ type: 'padd/export' }), // type is a single name, no slashes
         ev({ type: 'UPPER' }),
+        ev({ type: 'comment.created' }), // dotted types are Primer's own
+        ev({ namespace: 'primer' }), // reserved for Primer's lifecycle events
+        ev({ namespace: 'primer/comment' }),
+        ev({ audience: 'readers' }), // server-only audience
         { type: 'export', payload: {}, audience: 'artifact' }, // no namespace
       ]) {
         const { status } = await postEvents(app, documentId, OWNER, [bad]);
@@ -191,7 +203,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('accepts namespace `padd` with types export, verdict, reconciliation, grant', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const { status, body } = await postEvents(app, documentId, OWNER, [
         ev({ type: 'export' }),
         ev({ type: 'verdict' }),
@@ -205,7 +217,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('enforces the 256 KB serialized payload cap per event', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const big = 'x'.repeat(256 * 1024);
       const { status } = await postEvents(app, documentId, OWNER, [ev({ payload: { big } })]);
       expect(status).toBe(400);
@@ -220,7 +232,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('rejects an empty batch, a non-array body, and a batch above the cap', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       expect((await postEvents(app, documentId, OWNER, [])).status).toBe(400);
       const res = await app.request(`/api/documents/${documentId}/events`, {
         method: 'POST',
@@ -235,8 +247,8 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('versionId not belonging to the document → bad_request, nothing inserted', async () => {
     await withApp(async (app) => {
-      const first = await uploadFixture(app);
-      const second = await uploadFixture(app);
+      const first = await uploadDoc(app);
+      const second = await uploadDoc(app);
       const { status } = await postEvents(app, first.documentId, OWNER, [
         ev(),
         ev({ versionId: second.versionId }),
@@ -248,7 +260,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('collaborators may write; non-collaborator org readers get 403; strangers on private docs 404', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       // Org reader who is NOT a collaborator: can see the doc → explicit 403.
       expect((await postEvents(app, documentId, OUTSIDER, [ev()])).status).toBe(403);
       await addCollaborator(documentId, COLLAB, 'editor');
@@ -265,7 +277,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('responders write on both visibilities; commenters get 403 even as an org ghost row', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await addCollaborator(documentId, COLLAB, 'responder');
       await addCollaborator(documentId, OUTSIDER, 'commenter');
       // Org doc: the responder writes; the commenter row is a ghost (commenter
@@ -317,7 +329,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 
   it('404 for a missing or deleted document', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       expect((await postEvents(app, uuidv7(), OWNER, [ev()])).status).toBe(404);
       await db.update(documents).set({ deletedAt: new Date() }).where(eq(documents.id, documentId));
       expect((await postEvents(app, documentId, OWNER, [ev()])).status).toBe(404);
@@ -328,7 +340,7 @@ describe('POST /api/documents/:id/events — batch write', () => {
 describe('GET /api/documents/:id/events — audience scoping', () => {
   it('scopes rows per tier: author / collaborators / artifact', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await addCollaborator(documentId, COLLAB, 'editor');
       // Owner writes one row per tier; the collaborator writes an author row.
       await postEvents(app, documentId, OWNER, [
@@ -362,7 +374,7 @@ describe('GET /api/documents/:id/events — audience scoping', () => {
 
   it('commenter and responder both read collaborators- and artifact-audience rows, never another user\'s author rows', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, documentId));
       // Pages render from this data, so a commenter must keep reading it even
       // though it can no longer write events.
@@ -382,7 +394,7 @@ describe('GET /api/documents/:id/events — audience scoping', () => {
 
   it('strangers on private docs get 404 at every read surface', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, documentId));
       const list = await app.request(`/api/documents/${documentId}/events`, {
         headers: asUser(OUTSIDER),
@@ -399,7 +411,7 @@ describe('GET /api/documents/:id/events — audience scoping', () => {
 describe('GET /api/documents/:id/events — filters, since, pagination, versionId', () => {
   it('delivers ascending id; ?since returns only rows with greater ids', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const first = await postEvents(app, documentId, OWNER, [ev(), ev(), ev()]);
       const cutoff = first.body.events[1].id;
       const list = await listAll(app, documentId, OWNER, `?since=${cutoff}`);
@@ -409,7 +421,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('malformed since → bad_request', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       for (const bad of ['abc', '-1', '1.5', '1e3']) {
         const res = await app.request(
           `/api/documents/${documentId}/events?since=${encodeURIComponent(bad)}`,
@@ -423,7 +435,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('?namespace exact match and trailing-/* subtree; ?type exact', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await postEvents(app, documentId, OWNER, [
         ev({ namespace: 'padd', type: 'export' }),
         ev({ namespace: 'padd/telemetry', type: 'ping' }),
@@ -454,7 +466,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('rejects malformed filter values', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       for (const q of ['?namespace=Padd', '?namespace=%2F*', '?namespace=padd%2F**', '?type=a%2Fb']) {
         const res = await app.request(`/api/documents/${documentId}/events${q}`, {
           headers: asUser(OWNER),
@@ -466,7 +478,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('token pagination: bounded pages of ascending ids, followed to exhaustion', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const posted = await postEvents(
         app, documentId, OWNER,
         Array.from({ length: 7 }, (_, i) => ev({ payload: { i } })),
@@ -491,7 +503,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('malformed pageToken → bad_request', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const res = await app.request(`/api/documents/${documentId}/events?pageToken=%3F%3F%3F`, {
         headers: asUser(OWNER),
       });
@@ -501,7 +513,7 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it('?versionId is a provenance lens: only rows that DECLARED that version', async () => {
     await withApp(async (app) => {
-      const upload = await uploadFixture(app);
+      const upload = await uploadDoc(app);
       const v2 = uuidv7();
       await db.insert(versions).values({
         id: v2,
@@ -524,8 +536,8 @@ describe('GET /api/documents/:id/events — filters, since, pagination, versionI
 
   it("?versionId that isn't a version of this document → bad_request", async () => {
     await withApp(async (app) => {
-      const first = await uploadFixture(app);
-      const second = await uploadFixture(app);
+      const first = await uploadDoc(app);
+      const second = await uploadDoc(app);
       const res = await app.request(
         `/api/documents/${first.documentId}/events?versionId=${second.versionId}`,
         { headers: asUser(OWNER) },
@@ -612,7 +624,7 @@ describe('GET /api/documents/:id/events/stream — access is re-checked while th
   // connection lived (keepalives hold it open indefinitely).
   it('a collaborator removed from a private doc stops receiving rows and their stream closes; others keep receiving', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, documentId));
       await addCollaborator(documentId, COLLAB, 'commenter');
       await addCollaborator(documentId, OUTSIDER, 'commenter');
@@ -651,7 +663,7 @@ describe('GET /api/documents/:id/events/stream — access is re-checked while th
     process.env.EVENTS_SSE_KEEPALIVE_MS = '50';
     try {
       await withApp(async (app) => {
-        const { documentId } = await uploadFixture(app);
+        const { documentId } = await uploadDoc(app);
         await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, documentId));
         await addCollaborator(documentId, COLLAB, 'commenter');
         const res = await app.request(`/api/documents/${documentId}/events/stream`, { headers: asUser(COLLAB) });
@@ -673,7 +685,7 @@ describe('GET /api/documents/:id/events/stream — access is re-checked while th
 
   it('a collaborator removed from an org doc keeps the stream but stops receiving collaborators-audience rows', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await addCollaborator(documentId, COLLAB, 'responder');
       await addCollaborator(documentId, OUTSIDER, 'responder');
       const removedRes = await app.request(`/api/documents/${documentId}/events/stream`, { headers: asUser(OUTSIDER) });
@@ -703,7 +715,7 @@ describe('GET /api/documents/:id/events/stream — access is re-checked while th
 describe('GET /api/documents/:id/events/stream — SSE', () => {
   it('delivers live rows with SSE id: equal to the row id', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const res = await app.request(`/api/documents/${documentId}/events/stream`, {
         headers: asUser(OWNER),
       });
@@ -722,7 +734,7 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
 
   it('replays backlog on since / Last-Event-ID resume, then continues live', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const before = await postEvents(app, documentId, OWNER, [
         ev({ payload: { n: 1 } }),
         ev({ payload: { n: 2 } }),
@@ -748,7 +760,7 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
 
   it('applies namespace subtree + type filters on the stream (parity with the list)', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const res = await app.request(
         `/api/documents/${documentId}/events/stream?namespace=${encodeURIComponent('padd/*')}&type=ping`,
         { headers: asUser(OWNER) },
@@ -769,7 +781,7 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
 
   it('scopes live rows by audience (an author row of another user is not delivered)', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await addCollaborator(documentId, COLLAB, 'editor');
       const res = await app.request(`/api/documents/${documentId}/events/stream`, {
         headers: asUser(COLLAB),
@@ -789,7 +801,7 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
 
   it('delivers a collaborators-audience row to a commenter\'s stream (commenters keep read)', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, documentId));
       await addCollaborator(documentId, COLLAB, 'commenter');
       await addCollaborator(documentId, OUTSIDER, 'responder');
@@ -806,31 +818,12 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
     });
   });
 
-  it('delivers a live late-committing LOWER id rather than dropping it (consumers fold by id)', async () => {
-    await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
-      const posted = await postEvents(app, documentId, OWNER, [ev(), ev()]);
-      const [lowId, highId] = posted.body.events.map((r) => r.id);
-      // Resume from the highest id — the client believes it is caught up.
-      const res = await app.request(`/api/documents/${documentId}/events/stream`, {
-        headers: { ...asUser(OWNER), 'Last-Event-ID': String(highId) },
-      });
-      const sse = makeSseReader(res);
-      // A concurrent writer whose transaction drew a LOWER id commits only
-      // now — simulate by publishing the earlier row into the live fanout.
-      publishDocEvents(documentId, [posted.body.events[0]]);
-      const frame = await sse.waitFor((f) => f.id === String(lowId));
-      expect((JSON.parse(frame.data ?? '{}') as EventRowDTO).id).toBe(lowId);
-      await sse.close();
-    });
-  });
-
   it('emits periodic keepalive comments', async () => {
     const prev = process.env.EVENTS_SSE_KEEPALIVE_MS;
     process.env.EVENTS_SSE_KEEPALIVE_MS = '50';
     try {
       await withApp(async (app) => {
-        const { documentId } = await uploadFixture(app);
+        const { documentId } = await uploadDoc(app);
         const res = await app.request(`/api/documents/${documentId}/events/stream`, {
           headers: asUser(OWNER),
         });
@@ -847,7 +840,7 @@ describe('GET /api/documents/:id/events/stream — SSE', () => {
 
   it('malformed since on the stream → bad_request', async () => {
     await withApp(async (app) => {
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       const res = await app.request(`/api/documents/${documentId}/events/stream?since=nope`, {
         headers: asUser(OWNER),
       });
@@ -878,7 +871,7 @@ describe('publish flow primitives (issue #78 identity requirements)', () => {
   it('publish flow: owner uploads, resolves a reviewer by email, adds them as collaborator; the reviewer can then write events', async () => {
     await withApp(async (app) => {
       // 1. Publish (upload) as the owning principal (e.g. a service account).
-      const { documentId } = await uploadFixture(app);
+      const { documentId } = await uploadDoc(app);
       // 2. Resolve the commissioning human by email.
       const lookup = await app.request('/api/users/lookup?email=two@p.t', {
         headers: asUser(OWNER),

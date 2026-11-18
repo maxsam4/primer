@@ -1,5 +1,4 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
 import type { ThreadsListResponse } from '@polygonlabs/primer-api-types';
 import { api } from '../lib/fetch.ts';
 
@@ -39,25 +38,17 @@ async function fetchConditional(
   return { data, etag };
 }
 
+/** A version's threads. No polling: the document page refreshes this when a
+ *  comment or thread event arrives on the document's event stream, and on
+ *  any stream resync (routes/document.tsx). */
 export function useThreadsQuery(versionId: string) {
   const qc = useQueryClient();
-  const [paused, setPaused] = useState(typeof document !== 'undefined' && document.hidden);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const onVis = () => setPaused(document.hidden);
-    document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
-  }, []);
-
   return useQuery({
     queryKey: ['threads', versionId],
     queryFn: async ({ signal }) => {
       const previous = qc.getQueryData<CachedShape>(['threads', versionId]);
       return fetchConditional(versionId, previous, signal);
     },
-    refetchInterval: paused ? false : 10_000,
-    refetchIntervalInBackground: false,
     staleTime: 0,
     retry: 1,
     enabled: versionId.length > 0,
