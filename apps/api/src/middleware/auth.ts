@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import type { AppVariables } from '../app.ts';
 import type { UserResolver } from '../auth/resolver.ts';
 
@@ -70,6 +70,12 @@ export interface AuthMiddlewareOptions {
    * pointing clients to the protected-resource metadata document.
    */
   issuer?: string;
+  /**
+   * Response for an unauthenticated browser (non-API) request. Default:
+   * redirect to /auth/login. AUTH_MODE=proxy supplies a 401 page instead,
+   * because there is no login flow to redirect to.
+   */
+  unauthenticatedPage?: (c: Context<{ Variables: AppVariables }>) => Response;
 }
 
 export function authMiddleware(
@@ -102,6 +108,7 @@ export function authMiddleware(
       }
       return c.json({ error: 'unauthenticated' }, 401);
     }
+    if (options?.unauthenticatedPage) return options.unauthenticatedPage(c);
     const returnTo = encodeURIComponent(path);
     return c.redirect(`/auth/login?return_to=${returnTo}`, 302);
   };

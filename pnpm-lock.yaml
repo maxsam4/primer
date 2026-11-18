@@ -52,6 +52,9 @@ importers:
       hono:
         specifier: ^4.13.16
         version: 4.13.16
+      jose:
+        specifier: ^6.2.3
+        version: 6.2.3
       markdown-it:
         specifier: ^14.2.0
         version: 14.3.3

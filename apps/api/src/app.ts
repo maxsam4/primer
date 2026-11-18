@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { logger as appLogger } from './logger.ts';
 import { authMiddleware } from './middleware/auth.ts';
 import { csrfMiddleware } from './auth/csrf.ts';
+import { proxyUnauthorizedPage } from './auth/proxy.ts';
 import { scopeMiddleware } from './auth/scopes.ts';
 import { mockResolver, type UserResolver } from './auth/resolver.ts';
 import { registerUploadRoute } from './routes/upload.ts';
@@ -53,6 +54,7 @@ export interface AppDeps {
   notifier: Notifier;
   userResolver?: UserResolver;     // defaults to mockResolver (tests + dev)
   oktaAdapter?: OktaAdapter;            // NEW
+  proxyAuth?: boolean;                  // AUTH_MODE=proxy: no login flow, 401 page instead
   authCookieName?: string;              // NEW; defaults to 'primer_sid'
   authStateCookieName?: string;         // NEW; defaults to 'primer_auth_state'
   authBaseUrl?: string;                 // NEW; base URL used in device verification links
@@ -71,7 +73,13 @@ export function createApp(deps: AppDeps): Hono<{ Variables: AppVariables }> {
   ).replace(/\/$/, '');
 
   const resolver = deps.userResolver ?? mockResolver;
-  app.use('*', authMiddleware(resolver, issuer.length > 0 ? { issuer } : undefined));
+  app.use(
+    '*',
+    authMiddleware(resolver, {
+      ...(issuer.length > 0 ? { issuer } : {}),
+      ...(deps.proxyAuth ? { unauthenticatedPage: proxyUnauthorizedPage } : {}),
+    }),
+  );
   app.use('*', scopeMiddleware);
   app.use('*', csrfMiddleware);
 

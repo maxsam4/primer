@@ -149,7 +149,7 @@ them from `.env`. [`.env.example`](.env.example) lists every option with notes.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTH_MODE` | none, required | `mock` for local development (every request is a mock user; refused when `NODE_ENV=production`), or `okta` for real sign-in |
+| `AUTH_MODE` | none, required | `mock` for local development (every request is a mock user; refused when `NODE_ENV=production`), `okta` for OIDC sign-in, or `proxy` to trust a signed identity JWT from a reverse proxy (see [docs/self-host.md](docs/self-host.md)) |
 | `DATABASE_URL` | none, required | Postgres connection string |
 | `DATABASE_URL_TEST` | none | Test database, used by `pnpm db:migrate:test` and the API tests |
 | `PORT` | `3000` | Port the API listens on |
@@ -158,6 +158,7 @@ them from `.env`. [`.env.example`](.env.example) lists every option with notes.
 | `GCS_BUCKET` | none | Bucket for the `gcs` backend, which authenticates with the environment's Google credentials |
 | `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_CLIENT_SECRET` | none | OpenID Connect client, required when `AUTH_MODE=okta` |
 | `AUTH_BASE_URL` | none | The public URL of your instance. Required when `AUTH_MODE=okta`; also used for sign-in redirects, links in emails, and secure cookies |
+| `PROXY_AUTH_HEADER`, `PROXY_AUTH_PUBLIC_KEY` or `PROXY_AUTH_JWKS_URL`, `PROXY_AUTH_ISSUER`, `PROXY_AUTH_AUDIENCE` | none | Required when `AUTH_MODE=proxy` |
 | `OAUTH_ISSUER` | `AUTH_BASE_URL` | Issuer advertised to remote MCP clients |
 | `ADMIN_EMAILS` | none | Comma-separated admin emails. Admins can create service tokens, which act as a shared service account |
 | `SESSION_TTL_DAYS` | `14` | How long a browser session lasts |
@@ -193,6 +194,8 @@ To run it, you need:
 Optionally, set `ADMIN_EMAILS` to let admins create service tokens, and the
 Mailgun variables to send notification emails. `/api/health` and `/api/ready` are the
 liveness and readiness checks.
+
+For a ready-made Docker Compose setup and proxy sign-in, see [docs/self-host.md](docs/self-host.md).
 
 Primer was built for one organization. Everyone who can sign in through your
 identity provider can see documents that are shared with the organization and
