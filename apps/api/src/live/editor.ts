@@ -2,7 +2,7 @@ import * as Y from 'yjs';
 import { ServerBlockNoteEditor } from '@blocknote/server-util';
 import { getDocument } from '@blocknote/server-util/dom';
 import { yXmlFragmentToProsemirrorJSON } from 'y-prosemirror';
-import { primerSchema, commentMarkExtension, type PrimerSchema } from '@primer/blocks';
+import { primerSchema, commentMarkExtension, suggestionMarksExtension, type PrimerSchema } from '@primer/blocks';
 import { tabFragmentName } from './reach.ts';
 
 export type PrimerServerEditor = ServerBlockNoteEditor<
@@ -18,7 +18,7 @@ let editor: PrimerServerEditor | null = null;
  *  for conversions: `editor.pmSchema`, HTML/Markdown import and export. */
 export function serverEditor(): PrimerServerEditor {
   editor ??= ServerBlockNoteEditor.create(
-    { schema: primerSchema, extensions: [commentMarkExtension] },
+    { schema: primerSchema, extensions: [commentMarkExtension, suggestionMarksExtension] },
     getDocument(),
   ) as unknown as PrimerServerEditor;
   return editor;
