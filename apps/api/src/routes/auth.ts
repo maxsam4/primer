@@ -5,6 +5,7 @@ import { makeDisabledOktaAdapter, type OktaAdapter } from '../auth/okta.ts';
 import { logger } from '../logger.ts';
 import { sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
+import { proxyUnauthorizedPage } from '../auth/proxy.ts';
 import { createSession, deleteSession } from '../auth/session.ts';
 import { recheckAccess } from '../auth/revocation.ts';
 
@@ -41,10 +42,25 @@ function decodeState(raw: string): StateCookiePayload | null {
   }
 }
 
-function sanitizeReturnTo(input: string | undefined): string {
+// Only same-origin relative paths are accepted: a leading single `/`, no
+// backslashes or control characters (browsers treat `/\evil.com` like
+// `//evil.com`), and the parsed URL must stay on our origin.
+export function sanitizeReturnTo(input: string | undefined): string {
   if (!input) return '/';
   if (!input.startsWith('/') || input.startsWith('//')) return '/';
-  return input;
+  // eslint-disable-next-line no-control-regex
+  if (/[\\\u0000-\u001f\u007f]/.test(input)) return '/';
+  try {
+    const base = 'http://primer.invalid';
+    const url = new URL(input, base);
+    if (url.origin !== base) return '/';
+    const out = `${url.pathname}${url.search}${url.hash}`;
+    // Normalization can turn `/.//evil.com` into a protocol-relative `//evil.com`.
+    if (out.startsWith('//') || out.startsWith('/\\')) return '/';
+    return out;
+  } catch {
+    return '/';
+  }
 }
 
 function cookieOpts(maxAge: number, secure: boolean) {
@@ -66,6 +82,13 @@ export function registerAuthRoutes(
     (process.env.AUTH_BASE_URL ?? '').startsWith('https://');
 
   app.get('/auth/login', async (c) => {
+    if (deps.proxyAuth) {
+      // Identity comes from the proxy on every request; there is nothing to
+      // sign in to here. Signed in already -> carry on; otherwise explain.
+      const user = deps.userResolver ? await deps.userResolver(c) : null;
+      if (user) return c.redirect(sanitizeReturnTo(c.req.query('return_to')), 302);
+      return proxyUnauthorizedPage(c);
+    }
     try {
       const { url, state, nonce, codeVerifier } = await adapter.buildAuthorizationUrl();
       const returnTo = sanitizeReturnTo(c.req.query('return_to'));

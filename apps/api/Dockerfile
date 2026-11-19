@@ -48,7 +48,10 @@ COPY --from=build --chown=root:root /out/api /app/api
 COPY --from=build --chown=root:root /out/web /app/web
 # Code is root-owned and read-only to the app user, so a compromised process
 # cannot rewrite it. The filesystem storage backend must therefore be pointed
-# outside /app (STORAGE_ROOT).
+# outside /app (STORAGE_ROOT). /data/blobs is created here, owned by node: a
+# fresh named volume mounted there copies this ownership on first use, so the
+# filesystem backend can write to it without running as root.
+RUN mkdir -p /data/blobs && chown node:node /data/blobs
 USER node
 EXPOSE 3000
 WORKDIR /app/api

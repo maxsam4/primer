@@ -1,0 +1,59 @@
+# Self-hosting Primer: the app image (API + built web app) and Postgres.
+# See docs/self-host.md. Run with:
+#   cp .env.selfhost.example .env && docker compose -f docker-compose.selfhost.yml up -d --build
+# Migrations run when the primer container starts.
+services:
+  postgres:
+    # postgres:17.9, pinned by digest. Bump deliberately.
+    image: postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: primer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: primer
+    volumes:
+      - primer-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U primer -d primer"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  primer:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Published on loopback only: put your sign-in proxy in front of it.
+    ports:
+      - "127.0.0.1:${PRIMER_PORT:-3000}:3000"
+    environment:
+      AUTH_MODE: ${AUTH_MODE:-proxy}
+      DATABASE_URL: postgres://primer:${POSTGRES_PASSWORD}@postgres:5432/primer
+      STORAGE_BACKEND: filesystem
+      STORAGE_ROOT: /data/blobs
+      AUTH_BASE_URL: ${AUTH_BASE_URL:?set AUTH_BASE_URL (the public https URL) in .env}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      PROXY_AUTH_HEADER: ${PROXY_AUTH_HEADER:-}
+      PROXY_AUTH_PUBLIC_KEY: ${PROXY_AUTH_PUBLIC_KEY:-}
+      PROXY_AUTH_JWKS_URL: ${PROXY_AUTH_JWKS_URL:-}
+      PROXY_AUTH_ISSUER: ${PROXY_AUTH_ISSUER:-}
+      PROXY_AUTH_AUDIENCE: ${PROXY_AUTH_AUDIENCE:-}
+      MAILGUN_API_KEY: ${MAILGUN_API_KEY:-}
+      MAILGUN_DOMAIN: ${MAILGUN_DOMAIN:-}
+      MAILGUN_API_BASE_URL: ${MAILGUN_API_BASE_URL:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+    volumes:
+      - primer-blobs:/data/blobs
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  primer-pg:
+  primer-blobs:
