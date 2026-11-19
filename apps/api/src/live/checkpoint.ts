@@ -60,9 +60,11 @@ export async function writeCheckpoint(
   actor: AuthUser,
   note: string | null,
   captured: CapturedState,
+  /** A republish: the uploaded file, kept with the version. */
+  original?: { versionId: string; originalKey: string; sourceFormat: 'markdown' | 'text' },
 ): Promise<CheckpointResponse> {
   const [doc] = await db.select({ title: documents.title }).from(documents).where(eq(documents.id, documentId));
-  const versionId = uuidv7();
+  const versionId = original?.versionId ?? uuidv7();
   const bundle = await renderBundle(storage, { versionId, documentId, title: doc?.title ?? '', state: captured.state });
   const marked = markedThreads(captured.state);
   try {
@@ -81,6 +83,7 @@ export async function writeCheckpoint(
         versionNote: note,
         bundleKey: bundle.bundleKey,
         docVersion: captured.docVersion,
+        ...(original ? { originalKey: original.originalKey, sourceFormat: original.sourceFormat } : {}),
       });
       // Open threads stay listed on the checkpoint: anchored where their
       // comment mark is in the captured content, orphaned elsewhere.

@@ -428,6 +428,7 @@ export function registerDocumentRoutes(
       versionId: result.versionId,
       versionNumber: result.versionNumber,
       url: `/d/${docId}`,
+      ...(result.reconciliation ? { reconciliation: result.reconciliation } : {}),
     };
     return c.json(response, 201);
   });

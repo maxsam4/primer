@@ -554,6 +554,7 @@ export function buildMcpToolHandlers(deps: ToolDeps): Record<ToolName, ToolHandl
         versionId: result.versionId,
         versionNumber: result.versionNumber,
         url: `${deps.apiBaseUrl}/d/${documentId}`,
+        ...(result.reconciliation ? { reconciliation: result.reconciliation } : {}),
       });
     },
 

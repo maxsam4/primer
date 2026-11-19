@@ -47,7 +47,7 @@ Create a new document and upload its first version.
 Upload a new version of an existing document.
 
 - **Input:** `{ documentId: string, content?: string, contentPath?: string, format: "html" | "markdown" | "text", versionNote?: string, baseVersionNumber?: number }`. Exactly one of `content` or `contentPath` (local stdio server only).
-- **Output:** `{ versionId, versionNumber, url }`.
+- **Output:** `{ versionId, versionNumber, url, reconciliation? }`. On a live Markdown or text document the file is merged into the live blocks (`reconciliation` lists what happened per changed group): groups nobody edited take your text, groups people edited keep theirs and get your text as a suggestion, and comments stay. The format must match the document's.
 - Pass `baseVersionNumber`: the version you read before editing. If someone published since, the call is refused (`stale_base`) with a fix naming the latest version: read it, merge your change into it, and publish again with that number. Never retry without the merge.
 
 ### `primer_get_document`

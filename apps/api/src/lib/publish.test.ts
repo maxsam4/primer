@@ -131,10 +131,10 @@ describe('publishDocument', () => {
       expect(blocks).toBeGreaterThan(0);
       expect(new TextDecoder().decode(await readBundleFile(storage, version!.bundleKey!, 'export.md'))).toBe(source);
 
-      // Publishing onto a live document is refused, with a fix.
-      const again = await publishDocument(storage, md('# Other\n', { documentId: r.documentId }));
+      // Another format can't be merged into it.
+      const again = await publishDocument(storage, html('<p>Other</p>', { documentId: r.documentId }));
       expect(again.ok).toBe(false);
-      if (!again.ok) expect(again.refusal).toMatchObject({ code: 'republish_unsupported' });
+      if (!again.ok) expect(again.refusal).toMatchObject({ code: 'bad_request' });
     });
   });
 

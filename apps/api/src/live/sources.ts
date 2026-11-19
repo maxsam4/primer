@@ -43,7 +43,7 @@ const META = 'meta';
 const entryFields = (key: string, e: SourceEntry) => [key, e.slice, e.gap, e.groupIds, e.version, e.refs, e.defines];
 const metaFields = (m: LiveMeta) => [META, m.format, m.frontMatter, m.lead];
 
-/** Writes signed `sources` entries and `meta` (import only). */
+/** Writes signed `sources` entries and `meta` (import, republish). */
 export function writeSources(doc: Y.Doc, documentId: string, entries: Map<string, SourceEntry>, meta: LiveMeta): void {
   doc.transact(() => {
     const sources = doc.getMap<unknown>(SOURCES);
@@ -53,6 +53,15 @@ export function writeSources(doc: Y.Doc, documentId: string, entries: Map<string
     map.set('frontMatter', meta.frontMatter);
     map.set('lead', meta.lead);
     map.set('mac', sign(documentId, metaFields(meta)));
+  });
+}
+
+/** Replaces every `sources` entry and `meta` (a republish merge), signed. */
+export function rewriteSources(doc: Y.Doc, documentId: string, entries: Map<string, SourceEntry>, meta: LiveMeta): void {
+  doc.transact(() => {
+    const sources = doc.getMap<unknown>(SOURCES);
+    for (const key of [...sources.keys()]) if (!entries.has(key)) sources.delete(key);
+    writeSources(doc, documentId, entries, meta);
   });
 }
 

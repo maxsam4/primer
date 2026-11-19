@@ -416,6 +416,9 @@ export interface AddVersionResponse {
   versionId: string;
   versionNumber: number;
   url: string;
+  /** A new version of a live document is merged into it: what happened to
+   *  each changed group (applied, suggested, conflict). */
+  reconciliation?: Reconciliation;
 }
 
 /** Why the server refused a write, with a ready fix the caller (often an
