@@ -2,16 +2,20 @@ import * as Y from 'yjs';
 import { Node as PmNode } from '@tiptap/pm/model';
 import { Transform } from '@tiptap/pm/transform';
 import { updateYFragment, yXmlFragmentToProsemirrorJSON } from 'y-prosemirror';
-import type { EditOutcome, Reconciliation, Refusal, Target } from '@polygonlabs/primer-api-types';
+import { v7 as uuidv7 } from 'uuid';
+import type { BlockPlace, EditOutcome, Reconciliation, Refusal, Target } from '@polygonlabs/primer-api-types';
 import { blockVersion, findBlock } from './blocks.ts';
 import { serverEditor } from './editor.ts';
 import { liveDocName, liveInstance } from './instance.ts';
 import type { LiveOrigin } from './origin.ts';
 import { persistedUpTo } from './persist.ts';
 import { docQueue } from './queue.ts';
+import { effectiveAgentMode } from '../lib/permissions.ts';
 import { fragmentName } from './reach.ts';
+import { storeProposals, type Proposal, type SuggestedEdit } from './proposals.ts';
 
 export type { LiveOrigin } from './origin.ts';
+export type { BlockPlace } from '@polygonlabs/primer-api-types';
 
 /** The target block (a `blockContainer`) in the transform's current doc, or
  *  null when the fragment has no block with that id (a whole-fragment edit). */
@@ -21,6 +25,13 @@ export type Located = { pos: number; node: PmNode } | null;
 export type BuildContext = {
   /** `blockId` moved: undo puts it back at its prior place. */
   moved(blockId: string): void;
+  /**
+   * True when the build runs to make a suggestion of an edit that conflicted
+   * (`target_changed`): it should build what it would change against the
+   * document as it is now, skipping its own staleness checks. Its steps are
+   * never written; they become a stored suggestion.
+   */
+  suggesting: boolean;
 };
 
 export type PlannedEdit = {
@@ -30,8 +41,9 @@ export type PlannedEdit = {
   /**
    * Adds steps to `tr`. Synchronous: it runs inside the document's queue, on a
    * transform of its own, so returning a Refusal (or throwing) drops every
-   * step it added. A Refusal makes this edit a `conflict` and leaves the other
-   * edits of the plan alone; a throw aborts the whole plan.
+   * step it added. A Refusal makes this edit a `conflict` (or, for
+   * `target_changed` with `onConflict: 'suggest'`, a suggestion) and leaves
+   * the other edits of the plan alone; a throw aborts the whole plan.
    */
   build: (tr: Transform, at: Located, ctx: BuildContext) => Refusal | void;
   /** Capture per-block inverses for undo (`BlockInverse`). */
@@ -65,13 +77,24 @@ export type BlockInverse = {
 /** A block an edit created or changed, as stored, with its place in the tree. */
 export type AppliedBlock = { node: PmNode; parentId: string | null; depth: number };
 
-export type BlockPlace = { parentId: string | null; prevId: string | null; nextId: string | null };
-
 export type Plan = {
   edits: PlannedEdit[];
-  /** `suggest` turns conflicts into suggestions once suggestions exist; until
-   *  then both report `conflict`. */
+  /** `suggest` turns an edit whose target changed (`target_changed`) into a
+   *  stored suggestion (status `suggested`) instead of a conflict. */
   onConflict: 'refuse' | 'suggest';
+  /**
+   * `suggest` forces every edit to become a stored suggestion (e.g. a run
+   * whose requester can't edit). Without it the pipeline decides from the
+   * origin: an agent whose effective mode on the document is `suggest`
+   * (`effectiveAgentMode`) only ever suggests, whichever caller wrote the
+   * plan (ops, undo, republish merges…).
+   */
+  mode?: 'suggest';
+  /** Comment marks and other annotations: written as they are, never
+   *  suggested. */
+  annotation?: true;
+  /** Groups the suggestions this plan makes (default: one per plan). */
+  changeSetId?: string;
   /** Runs on the document's queue just before the mutation, with the live
    *  Y.Doc (read it with `liveFragment`); a refusal turns every edit into a
    *  conflict carrying it (e.g. a cancelled run). */
@@ -79,6 +102,12 @@ export type Plan = {
   /** Runs once the update is stored, with its docVersion (e.g. to write the
    *  run's inverses). */
   afterPersist?: (result: { docVersion: number; inverses: BlockInverse[] }) => Promise<void>;
+  /** Runs inside the write's Yjs transaction, after the fragments were
+   *  written (e.g. to rewrite `sources`). Synchronous. */
+  alsoWrite?: (doc: Y.Doc, outcomes: EditOutcome[], suggesting: boolean) => void;
+  /** Runs on the document's queue right after the write, before anything
+   *  else can change the document (DB work only; never awaits the pipeline). */
+  afterWrite?: (outcomes: EditOutcome[]) => Promise<void>;
 };
 
 /**
@@ -92,6 +121,10 @@ export type Plan = {
  * untouched. Resolves once the update is stored.
  */
 export async function applyPlan(documentId: string, origin: LiveOrigin, plan: Plan): Promise<Reconciliation> {
+  const suggesting =
+    plan.mode === 'suggest' ||
+    (!plan.annotation && origin.kind === 'agent' && (await effectiveAgentMode(documentId, origin.actorId)) === 'suggest');
+  const changeSetId = suggesting ? (plan.changeSetId ?? uuidv7()) : (plan.changeSetId ?? null);
   const connection = await liveInstance().openDirectConnection(liveDocName(documentId), origin);
   try {
     const doc = connection.document!;
@@ -106,14 +139,17 @@ export async function applyPlan(documentId: string, origin: LiveOrigin, plan: Pl
         }));
         return { outcomes, inverses: [] as BlockInverse[] };
       }
-      const prepared = prepare(doc, plan.edits);
-      if (prepared.writes.length > 0) {
+      const prepared = prepare(doc, plan, suggesting);
+      if (prepared.writes.length > 0 || plan.alsoWrite) {
         await connection.transact(() => {
           for (const write of prepared.writes) {
             updateYFragment(doc, write.fragment, write.doc, { mapping: new Map(), isOMark: new Map() });
           }
+          plan.alsoWrite?.(doc, prepared.outcomes, suggesting);
         });
       }
+      if (prepared.proposals.length > 0) await storeProposals(documentId, origin, changeSetId, prepared.proposals);
+      if (plan.afterWrite) await plan.afterWrite(prepared.outcomes);
       return { outcomes: prepared.outcomes, inverses: prepared.inverses };
     });
     const docVersion = await persistedUpTo(doc);
@@ -129,13 +165,47 @@ export function liveFragment(doc: Y.Doc, target: Target): PmNode {
   return toPmDoc(doc.getXmlFragment(fragmentName(target)));
 }
 
-/** Synchronous: locate, check, build and capture inverses for every edit. */
-function prepare(doc: Y.Doc, edits: PlannedEdit[]) {
+/** Synchronous: locate, check, build and capture inverses for every edit;
+ *  edits that become suggestions are diffed into proposals, never written. */
+function prepare(doc: Y.Doc, plan: Plan, suggestMode: boolean) {
   const fragments = new Map<string, { fragment: Y.XmlFragment; tr: Transform }>();
   const outcomes: EditOutcome[] = [];
   const inverses: BlockInverse[] = [];
+  const proposals: Proposal[] = [];
 
-  edits.forEach((edit, index) => {
+  /** Diffs a scratch transform into a stored suggestion; false when it
+   *  changes no block. */
+  const propose = (index: number, edit: PlannedEdit, scratch: Transform, moved: Set<string>, conflict: boolean): boolean => {
+    const edits = forwardDiff(scratch.before, scratch.doc, moved, edit.target.tabId);
+    if (edits.length === 0) return false;
+    const id = uuidv7();
+    proposals.push({ id, tabId: edit.target.tabId, edits, conflict });
+    outcomes.push({
+      index,
+      target: edit.target,
+      status: 'suggested',
+      suggestionId: id,
+      ...(conflict ? { note: 'The block changed since you read it; your edit was stored as a suggestion for a person to decide.' } : {}),
+    });
+    return true;
+  };
+
+  /** A conflicting edit, built again against the document as it is now. */
+  const suggestInstead = (index: number, edit: PlannedEdit, base: PmNode, at: Located): boolean => {
+    if (edit.expectVersion !== undefined && at === null) return false;
+    const scratch = new Transform(base);
+    const moved = new Set<string>();
+    try {
+      if (edit.build(scratch, at, { moved: (id) => moved.add(id), suggesting: true })) return false;
+      if (scratch.steps.length === 0) return false;
+      scratch.doc.check();
+    } catch {
+      return false;
+    }
+    return propose(index, edit, scratch, moved, true);
+  };
+
+  plan.edits.forEach((edit, index) => {
     const name = fragmentName(edit.target);
     let entry = fragments.get(name);
     if (!entry) {
@@ -143,21 +213,20 @@ function prepare(doc: Y.Doc, edits: PlannedEdit[]) {
       entry = { fragment, tr: new Transform(toPmDoc(fragment)) };
       fragments.set(name, entry);
     }
-    const at = findBlock(entry.tr.doc, edit.target.blockId);
+    const base = entry.tr.doc;
+    const at = findBlock(base, edit.target.blockId);
+    const conflict = (refusal: Refusal) => {
+      if (refusal.code === 'target_changed' && plan.onConflict === 'suggest' && suggestInstead(index, edit, base, at)) return;
+      outcomes.push({ index, target: edit.target, status: 'conflict', refusal });
+    };
     if (edit.expectVersion !== undefined) {
       const current = at ? blockVersion(at.node) : null;
-      if (current !== edit.expectVersion) {
-        outcomes.push({ index, target: edit.target, status: 'conflict', refusal: targetChanged(edit.target, current) });
-        return;
-      }
+      if (current !== edit.expectVersion) return conflict(targetChanged(edit.target, current));
     }
-    const scratch = new Transform(entry.tr.doc);
+    const scratch = new Transform(base);
     const moved = new Set<string>();
-    const refusal = edit.build(scratch, at, { moved: (id) => moved.add(id) });
-    if (refusal) {
-      outcomes.push({ index, target: edit.target, status: 'conflict', refusal });
-      return;
-    }
+    const refusal = edit.build(scratch, at, { moved: (id) => moved.add(id), suggesting: false });
+    if (refusal) return conflict(refusal);
     if (scratch.steps.length === 0) {
       outcomes.push({ index, target: edit.target, status: 'unchanged' });
       return;
@@ -166,6 +235,10 @@ function prepare(doc: Y.Doc, edits: PlannedEdit[]) {
       scratch.doc.check();
     } catch (err) {
       outcomes.push({ index, target: edit.target, status: 'conflict', refusal: invalidStructure(err) });
+      return;
+    }
+    if (suggestMode) {
+      if (!propose(index, edit, scratch, moved, false)) outcomes.push({ index, target: edit.target, status: 'unchanged' });
       return;
     }
     for (const step of scratch.steps) entry.tr.step(step);
@@ -182,7 +255,7 @@ function prepare(doc: Y.Doc, edits: PlannedEdit[]) {
   const writes = [...fragments.values()]
     .filter((entry) => entry.tr.docChanged)
     .map((entry) => ({ fragment: entry.fragment, doc: entry.tr.doc }));
-  return { outcomes, inverses, writes };
+  return { outcomes, inverses, writes, proposals };
 }
 
 /** A block's own content (type, props, inline content), without its
@@ -257,6 +330,41 @@ function blockDiff(before: PmNode, after: PmNode, moved: Set<string>) {
     inverses.push({ blockId: id, prior: null, afterVersion: blockVersion(now.node), place: null });
   }
   return { inverses, touched };
+}
+
+/**
+ * What one edit would change, block by block, as forward edits a person can
+ * accept later (live/suggest.ts replays them): created subtrees are
+ * `insert`s at their new place, removed ones `delete`s (base: the whole
+ * subtree's version), changed blocks `replace` their own content (base: the
+ * content version), moved ones `move`. Only the topmost block of a created or
+ * removed subtree is recorded.
+ */
+function forwardDiff(before: PmNode, after: PmNode, moved: Set<string>, tabId: string): SuggestedEdit[] {
+  const b = indexBlocks(before);
+  const a = indexBlocks(after);
+  const out: SuggestedEdit[] = [];
+  const target = (blockId: string): Target => ({ tabId, blockId });
+  for (const [id, old] of b) {
+    const now = a.get(id);
+    if (!now) {
+      const parent = old.place.parentId;
+      if (parent !== null && b.has(parent) && !a.has(parent)) continue;
+      out.push({ kind: 'delete', target: target(id), base: blockVersion(old.node), proposed: null, place: null });
+      continue;
+    }
+    const changed = contentVersion(old.node) !== contentVersion(now.node);
+    const place = moved.has(id) ? now.place : null;
+    if (changed) out.push({ kind: 'replace', target: target(id), base: contentVersion(old.node), proposed: now.node.toJSON(), place });
+    else if (place) out.push({ kind: 'move', target: target(id), base: contentVersion(old.node), proposed: null, place });
+  }
+  for (const [id, now] of a) {
+    if (b.has(id)) continue;
+    const parent = now.place.parentId;
+    if (parent !== null && a.has(parent) && !b.has(parent)) continue;
+    out.push({ kind: 'insert', target: target(id), base: null, proposed: now.node.toJSON(), place: now.place });
+  }
+  return out;
 }
 
 function toPmDoc(fragment: Y.XmlFragment): PmNode {

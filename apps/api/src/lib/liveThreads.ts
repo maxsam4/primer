@@ -254,7 +254,7 @@ async function placeMark(
   edit: PlannedEdit,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
-    await applyPlan(documentId, originFor(user), { onConflict: 'refuse', edits: [edit] });
+    await applyPlan(documentId, originFor(user), { onConflict: 'refuse', annotation: true, edits: [edit] });
     return { ok: true };
   } catch (err) {
     if (err instanceof AnchorMissingError) return { ok: false, message: err.message };

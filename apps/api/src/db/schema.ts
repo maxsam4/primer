@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   primaryKey,
   index,
+  boolean,
   customType,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
@@ -647,5 +648,35 @@ export const runInverses = pgTable(
   },
   (t) => ({
     byRun: index('run_inverses_run_id_idx').on(t.runId, t.id),
+  }),
+);
+
+// A proposed change to a live document (live/suggest.ts): stored proposals,
+// not marks in the Y.Doc (y-prosemirror drops node marks, so block-level
+// suggestions can't live there). `edits` lists per-block edits (kind, target,
+// the proposed blockContainer JSON, the base version it expects, the place);
+// accepting replays them through the pipeline with those preconditions.
+// `conflict`: made from an edit that conflicted, rather than suggest mode.
+export const suggestions = pgTable(
+  'suggestions',
+  {
+    id: uuid('id').primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    authorId: text('author_id').notNull().references(() => users.id),
+    runId: uuid('run_id').references(() => agentRuns.id, { onDelete: 'set null' }),
+    changeSetId: uuid('change_set_id'),
+    status: text('status', { enum: ['open', 'accepted', 'rejected', 'withdrawn'] }).notNull().default('open'),
+    tabId: text('tab_id').notNull(),
+    targetIds: text('target_ids').array().notNull(),
+    edits: jsonb('edits').$type<Record<string, unknown>[]>().notNull(),
+    conflict: boolean('conflict').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: text('decided_by').references(() => users.id),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+  },
+  (t) => ({
+    byDoc: index('suggestions_document_id_idx').on(t.documentId, t.status, t.createdAt),
   }),
 );

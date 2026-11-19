@@ -12,6 +12,7 @@ import type {
   EventInput,
   EventsListResponse,
   SendEventsResponse,
+  SuggestionsResponse,
   ThreadDTO,
   ThreadsListResponse,
   UploadResponse,
@@ -224,6 +225,23 @@ export class PrimerClient {
     }
     const json = action === 'fail' ? { error: input.error ?? 'failed' } : {};
     return this.request<AgentRunDTO>({ method: 'POST', path: `/api/runs/${id}/finish`, json });
+  }
+
+  /** The open suggestions on a live document (fenced for agents). */
+  listSuggestions(documentId: string): Promise<SuggestionsResponse> {
+    return this.request<SuggestionsResponse>({
+      method: 'GET',
+      path: `/api/documents/${encodeURIComponent(documentId)}/suggestions`,
+    });
+  }
+
+  /** Withdraws one of the caller's own suggestions. */
+  withdrawSuggestion(suggestionId: string): Promise<Reconciliation> {
+    return this.request<Reconciliation>({
+      method: 'POST',
+      path: `/api/suggestions/${encodeURIComponent(suggestionId)}/withdraw`,
+      json: {},
+    });
   }
 
   /** Edits a live document by block (see primer_apply_ops). */

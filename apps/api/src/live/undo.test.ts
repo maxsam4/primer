@@ -6,6 +6,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import { claimRun, finishRun, requestRun } from './runs.ts';
 import { undoRun } from './undo.ts';
+import { decideSuggestion } from './suggest.ts';
 
 const owner: AuthUser = { id: 'mock-user-1', email: 'mock@example.com', displayName: 'Mock User', kind: 'person', viaUserId: null };
 const main = (blockId: string) => ({ tabId: 'main', blockId });
@@ -74,8 +75,6 @@ describe('undoRun', () => {
   }, 15_000);
 
   it('a block changed since the run becomes a restore suggestion', async () => {
-    // Until suggestions land (M5) the block is left untouched and reported
-    // as a conflict; M5 turns that conflict into a restore suggestion.
     const { agent, id, runId } = await setup();
     const v = await versions(id, agent);
     await ops(id, agent, {
@@ -91,8 +90,12 @@ describe('undoRun', () => {
     const result = await undo(runId);
     const byBlock = Object.fromEntries(result.outcomes.map((o) => [o.target.blockId, o]));
     expect(byBlock.a).toMatchObject({ status: 'applied' });
-    expect(byBlock.b).toMatchObject({ status: 'conflict', refusal: { code: 'target_changed' } });
+    expect(byBlock.b).toMatchObject({ status: 'suggested', suggestionId: expect.any(String) });
     expect(await markdownOf(id, agent)).toEqual(['Alpha', 'Beta by person', 'Gamma', 'Delta']);
+
+    // Accepting the restore puts the block back as it was before the run.
+    expect(await decideSuggestion(byBlock.b!.suggestionId!, owner, 'accept')).toMatchObject({ ok: true });
+    expect(await markdownOf(id, agent)).toEqual(['Alpha', 'Beta', 'Gamma', 'Delta']);
   });
 
   it('blocks and fragments the run created are removed', async () => {
@@ -119,7 +122,7 @@ describe('undoRun', () => {
     await ops(id, owner, { ops: [{ op: 'update', target: main(nested), block: '- nested, by a person', expectVersion: v[nested] }] });
 
     const result = await undo(runId);
-    expect(result.outcomes[0]).toMatchObject({ status: 'conflict', refusal: { code: 'target_changed' } });
+    expect(result.outcomes[0]).toMatchObject({ status: 'suggested' });
     expect(await markdownOf(id, agent)).toContain('* nested, by a person');
   });
 

@@ -248,14 +248,14 @@ describe('runs act for their requester', () => {
     return { agent, id, commenter };
   }
 
-  it("a commenter's run can't apply a direct edit", async () => {
+  it("a commenter's run gets its edits as suggestions, not edits", async () => {
     const { agent, id, commenter } = await commenterSetup();
     const asked = await requestRun(commenter, id, { agentId: agent.id, request: ask() });
     if (!asked.ok) throw new Error(asked.refusal.message);
     await claimRun(agent, asked.value.id);
 
-    const out = await applyOps(id, agent, { baseVersion: 0, runId: asked.value.id, ops: [addOne('Not allowed')] });
-    expect(out).toMatchObject({ ok: false, status: 403, refusal: { code: 'requester_cannot_edit' } });
+    const out = await applyOps(id, agent, { baseVersion: 0, runId: asked.value.id, ops: [addOne('Not applied')] });
+    expect(out).toMatchObject({ ok: true, value: { outcomes: [{ status: 'suggested' }] } });
     expect(await markdownOf(id, agent)).toEqual(['Alpha']);
   });
 

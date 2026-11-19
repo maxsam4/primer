@@ -24,9 +24,8 @@ type InverseRow = {
  * Undoes one agent run from its stored inverses (run_inverses), newest first,
  * in one pass through the pipeline. Each block is put back only if it is
  * still as the run left it (its content version equals `after_version`), so a
- * person's later edit is never overwritten: such a block becomes a conflict,
- * which suggestions (M5) turn into a restore suggestion (`onConflict:
- * 'suggest'`). Blocks the run created are removed, removed ones re-inserted at
+ * person's later edit is never overwritten: such a block becomes a restore
+ * suggestion (`onConflict: 'suggest'`) for a person to decide. Blocks the run created are removed, removed ones re-inserted at
  * their place, changed ones restored, moved ones moved back. Durable: works
  * after a restart, with no expiry. Allowed for owners and editors (role read
  * now), once the run has stopped.
@@ -70,11 +69,13 @@ function toEdit(row: InverseRow): PlannedEdit {
   return {
     target: row.target,
     inverse: false,
-    build: (tr, at) => {
+    build: (tr, at, ctx) => {
+      // Suggesting: what restoring would do to the block as it is now.
+      const stale = (changed: boolean) => changed && !ctx.suggesting;
       if (prior === null) {
         // The run created this block: remove it, unless someone changed it.
         if (!at) return;
-        if (blockVersion(at.node) !== row.afterVersion) return changedSince(row.target);
+        if (stale(blockVersion(at.node) !== row.afterVersion)) return changedSince(row.target);
         return removeBlock(tr, at);
       }
       if (row.afterVersion === null) {
@@ -82,8 +83,8 @@ function toEdit(row: InverseRow): PlannedEdit {
         if (at) return;
         return insertAt(tr, prior, row.place!);
       }
-      if (!at || contentVersion(at.node) !== row.afterVersion) return changedSince(row.target);
-      if (contentVersion(prior) !== row.afterVersion) {
+      if (!at || stale(contentVersion(at.node) !== row.afterVersion)) return changedSince(row.target);
+      if (contentVersion(prior) !== contentVersion(at.node)) {
         tr.replaceWith(at.pos + 1, at.pos + 1 + at.node.firstChild!.nodeSize, prior.firstChild!);
       }
       if (row.place) {
@@ -99,7 +100,7 @@ function toEdit(row: InverseRow): PlannedEdit {
 
 /** Inserts `node` at its recorded place: after its previous sibling, before
  *  its next one, first in its parent, or first in the document. */
-function insertAt(tr: Transform, node: PmNode, place: BlockPlace): Refusal | void {
+export function insertAt(tr: Transform, node: PmNode, place: BlockPlace): Refusal | void {
   const prev = place.prevId ? findBlock(tr.doc, place.prevId) : null;
   if (prev) {
     tr.insert(prev.pos + prev.node.nodeSize, node);

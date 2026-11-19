@@ -1,6 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import type { AnyColumn } from 'drizzle-orm';
-import type { CollaboratorRole } from '@polygonlabs/primer-api-types';
+import type { AgentMode, CollaboratorRole } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 
@@ -95,4 +95,30 @@ export function canEdit(role: EffectiveRole): boolean {
 
 export function canManage(role: EffectiveRole): boolean {
   return role === 'owner';
+}
+
+/**
+ * How an actor's edits land on a live document: `edit` writes them, `suggest`
+ * stores them as suggestions for a person to decide. People always edit. An
+ * agent follows the document's `agentMode`; `auto` (the default) edits only
+ * documents the agent owns: ones it or its person uploaded (or another agent
+ * of its person did, which makes the person the owner). An agent's role on
+ * its person's document is capped at editor, so ownership is compared by
+ * person, not by role.
+ */
+export async function effectiveAgentMode(documentId: string, actorId: string): Promise<'edit' | 'suggest'> {
+  const [row] = (await db.execute(sql`
+    SELECT d.agent_mode AS "agentMode", d.uploader_id AS "uploaderId", up.via_user_id AS "uploaderVia",
+           a.kind, a.via_user_id AS "actorVia"
+      FROM documents d
+      LEFT JOIN users up ON up.id = d.uploader_id
+      LEFT JOIN users a ON a.id = ${actorId}
+     WHERE d.id = ${documentId}
+  `)) as unknown as { agentMode: AgentMode; uploaderId: string; uploaderVia: string | null; kind: string | null; actorVia: string | null }[];
+  if (!row) return 'suggest';
+  if (row.kind === 'person') return 'edit';
+  if (row.agentMode !== 'auto') return row.agentMode;
+  if (row.uploaderId === actorId) return 'edit';
+  const ownerPerson = row.uploaderVia ?? row.uploaderId;
+  return row.actorVia !== null && ownerPerson === row.actorVia ? 'edit' : 'suggest';
 }
