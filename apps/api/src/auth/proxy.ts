@@ -112,7 +112,7 @@ export function makeProxyResolver(opts: ProxyAuthOptions): UserResolver {
       seen.set(id, fingerprint);
     }
     c.set('authMethod', 'cookie');
-    return { id, email: claims.email, displayName: claims.name };
+    return { id, email: claims.email, displayName: claims.name, kind: 'person', viaUserId: null };
   };
 }
 

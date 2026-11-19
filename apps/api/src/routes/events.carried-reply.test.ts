@@ -13,7 +13,7 @@ import { mockMultiResolver } from '../auth/resolver.ts';
 import { buildMcpToolHandlers } from '../mcp/tools.ts';
 import { asUser, asUserJson } from '../test/harness.ts';
 
-const user = { id: 'mock-user-1', email: 'mock@example.com', displayName: 'Mock User' };
+const user = { id: 'mock-user-1', email: 'mock@example.com', displayName: 'Mock User', kind: 'person' as const, viaUserId: null };
 const DOC = '<h1>Plan</h1><p>The launch date is Friday.</p>';
 
 async function frames(res: Response, ms: number): Promise<EventRowDTO[]> {

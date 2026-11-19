@@ -6,7 +6,7 @@ import { createApp } from '../app.ts';
 import { NoopNotifier } from '../notifications/notifier.ts';
 import { FilesystemStorage } from '../storage/filesystem.ts';
 import { db } from '../db/client.ts';
-import { SERVICE_USER_ID } from './admin.ts';
+const SERVICE_USER_ID = 'service-claude';
 import { sanitizeReturnTo } from '../routes/auth.ts';
 import { apiTokens, users } from '../db/schema.ts';
 import { composeResolvers, makeBearerResolver } from './bearer.ts';
