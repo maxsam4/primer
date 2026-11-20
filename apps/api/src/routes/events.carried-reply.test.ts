@@ -66,7 +66,7 @@ describe('MCP reply on a carried thread', () => {
       });
       expect(started.status).toBe(201);
       const threadId = ((await started.json()) as ThreadDTO).id;
-      await call('primer_add_version', { documentId, format: 'html', content: DOC });
+      const { versionId: v2 } = await call('primer_add_version', { documentId, format: 'html', content: DOC });
 
       const before = (await (await app.request(`/api/documents/${documentId}/events?namespace=primer`, {
         headers: asUser(user.id),
@@ -79,10 +79,10 @@ describe('MCP reply on a carried thread', () => {
 
       const rows = await frames(stream, 500);
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ namespace: 'primer', type: 'comment.created', documentId });
+      expect(rows[0]).toMatchObject({ namespace: 'primer', type: 'comment.created', documentId, versionId: v2 });
       expect(rows[0].payload).toEqual({
         document_id: documentId,
-        version_id: rows[0].versionId,
+        version_id: v2,
         thread_id: threadId,
         comment_id,
         author_id: user.id,

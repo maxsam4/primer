@@ -116,7 +116,17 @@ export async function replyToThread(
            v.id AS version_id, v.version_number::int AS version_number
     FROM threads t
     INNER JOIN documents d ON d.id = t.document_id
-    LEFT JOIN versions v ON v.id = t.version_id
+    LEFT JOIN LATERAL (
+      -- A thread carried onto newer versions lives on its newest placement.
+      SELECT pv.id, pv.version_number
+      FROM thread_placements tp
+      INNER JOIN versions pv ON pv.id = tp.version_id
+      WHERE tp.thread_id = t.id
+      UNION ALL
+      SELECT ov.id, ov.version_number FROM versions ov WHERE ov.id = t.version_id
+      ORDER BY version_number DESC
+      LIMIT 1
+    ) v ON true
     WHERE t.id = ${threadId}
     LIMIT 1
   `)) as unknown as Array<{

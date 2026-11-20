@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import taskLists from 'markdown-it-task-lists';
 import type { Node as PmNode } from '@tiptap/pm/model';
 import type { BlockInput } from '@polygonlabs/primer-api-types';
 import { serverEditor } from './editor.ts';
@@ -6,9 +7,10 @@ import { serverEditor } from './editor.ts';
 /** The input kinds an agent can write a block in. */
 export type InputKind = 'markdown' | 'html' | 'json';
 
-// The one Markdown parser (markdown-it), as for imports. Raw HTML in agent
+// The one Markdown parser (markdown-it), as for imports, with its task lists
+// (`- [ ] x` is a check list item, as primer_get_doc writes it). Raw HTML in agent
 // Markdown is text; a single HTML element goes in `{ html }`.
-const md = new MarkdownIt({ html: false, linkify: true, breaks: false, typographer: false });
+const md = new MarkdownIt({ html: false, linkify: true, breaks: false, typographer: false }).use(taskLists, { label: false });
 
 export class InputError extends Error {}
 
