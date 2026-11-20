@@ -277,13 +277,13 @@ describe('external share public routes', () => {
       const checkpoint = await f.app.request(`/api/documents/${doc.documentId}/checkpoints`, { method: 'POST', headers: CSRF_HEADERS });
       const { versionId } = (await checkpoint.json()) as { versionId: string };
       // Live data moves on after publish.
-      await records.update({ collection: 'metrics', scope: 'shared', recordId: 'w2', data: { signups: 999 } });
+      await records.update({ collection: 'metrics', scope: 'shared', recordId: 'w2', data: { signups: 731905 } });
 
       const table = await (await share(doc.documentId, versionId)).text();
       expect(table).toContain('<th>Week</th><th>Signups</th>');
       expect(table).toContain('<td>W1</td><td>240</td>');
       expect(table).toContain('<td>W2 &lt;b&gt;bold&lt;/b&gt;</td><td>410</td>');
-      expect(table).not.toContain('999');
+      expect(table).not.toContain('<td>731905</td>');
       expect(table).not.toContain('unbound-in-markdown');
 
       // A record-reading page reads the same frozen records, under the records lockdown.
