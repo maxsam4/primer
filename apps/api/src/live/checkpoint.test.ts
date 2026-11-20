@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { flushAutoCheckpoints } from './autoCheckpoint.ts';
 import { eq } from 'drizzle-orm';
 import type { CheckpointResponse, Reconciliation } from '@polygonlabs/primer-api-types';
 import { createApp } from '../app.ts';
@@ -108,6 +109,39 @@ describe('checkpoints', () => {
       expect(after.at(-1)!.actorId).toBe(MOCK_USER.id);
       // Later history is kept: checkpoint 2 still holds the edit.
       expect(dec(await readBundleFile(storage, await bundleOf(v2.versionId), 'export.md'))).toContain('and the export first');
+    });
+  });
+
+  it('edits that settle save one automatic checkpoint; an unchanged document saves none', async () => {
+    await withStorage(async (storage) => {
+      const app = createApp({ storage, notifier: new NoopNotifier() });
+      const v1 = await publish(storage, { content: SOURCE, format: 'markdown' });
+      const listed = async () => (await db.select().from(versions).where(eq(versions.documentId, v1.documentId))).sort((a, b) => a.versionNumber - b.versionNumber);
+      const save = () => app.request(`/api/documents/${v1.documentId}/checkpoints`, { method: 'POST', headers: CSRF_HEADERS });
+
+      // Nothing changed since the upload: a save still checkpoints, and says so.
+      const unchanged = await save();
+      expect(unchanged.status).toBe(201);
+      expect(await unchanged.json()).toMatchObject({ versionNumber: 2, unchangedSince: 1 });
+
+      await setText(v1.documentId, 'Then tabs.', 'Then tabs, and comments.');
+      await flushAutoCheckpoints();
+      const auto = (await listed()).at(-1);
+      expect(auto).toMatchObject({ versionNumber: 3, automatic: true, versionNote: null });
+      expect(dec(await readBundleFile(storage, auto!.bundleKey!, 'export.md'))).toContain('Then tabs, and comments.');
+
+      // No edit since: a flush adds nothing.
+      await flushAutoCheckpoints();
+      expect(await listed()).toHaveLength(3);
+
+      // A save after an edit is a checkpoint by hand, which leaves the
+      // automatic one nothing to save.
+      await setText(v1.documentId, 'Ship the editor first.', 'Ship the editor now.');
+      const saved = await save();
+      expect(await saved.json()).not.toHaveProperty('unchangedSince');
+      expect((await listed()).at(-1)).toMatchObject({ versionNumber: 4, automatic: false });
+      await flushAutoCheckpoints();
+      expect(await listed()).toHaveLength(4);
     });
   });
 

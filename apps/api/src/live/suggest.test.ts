@@ -81,6 +81,23 @@ describe('suggestions', () => {
     expect(await open(id)).toEqual([]);
   });
 
+  it('a person suggests with mode suggest: the owner as well as a commenter, who may not edit', async () => {
+    const { id } = await setup();
+    const commenter = await person('collab-commenter');
+    await grant(id, commenter.id, 'commenter');
+    const v = await versions(id, owner);
+    await expect(ops(id, commenter, { ops: [{ op: 'update', target: main('b'), block: 'Beta, edited', expectVersion: v.b }] })).rejects.toThrow(/forbidden/);
+    const mine = await ops(id, owner, { mode: 'suggest', ops: [{ op: 'update', target: main('a'), block: 'Alpha, suggested', expectVersion: v.a }] });
+    const theirs = await ops(id, commenter, { mode: 'suggest', ops: [{ op: 'update', target: main('b'), block: 'Beta, suggested', expectVersion: v.b }] });
+    expect([mine.outcomes[0]!.status, theirs.outcomes[0]!.status]).toEqual(['suggested', 'suggested']);
+    expect(await markdownOf(id, owner)).toEqual(['Alpha', 'Beta', 'Gamma']);
+    const list = await open(id);
+    expect(list.map((s) => s.authorId).sort()).toEqual([commenter.id, owner.id].sort());
+    const fromCommenter = list.find((s) => s.authorId === commenter.id)!;
+    expect(await decideSuggestion(fromCommenter.id, owner, 'accept')).toMatchObject({ ok: true });
+    expect(await markdownOf(id, owner)).toEqual(['Alpha', 'Beta, suggested', 'Gamma']);
+  });
+
   it('an agent in suggest mode gets suggestions, not direct edits, from apply_ops', async () => {
     const { id, agent } = await setup();
     const v = await versions(id, agent);

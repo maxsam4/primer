@@ -2,25 +2,32 @@ import { t } from '../i18n/index.ts';
 import { useEffect, useState } from 'react';
 import type { HocuspocusProvider } from '@hocuspocus/provider';
 import { CLOSE_FORBIDDEN, CLOSE_SAVE_FAILED } from './provider.ts';
-import { connectionView, UNSAVED_AFTER_MS } from './connectionState.ts';
+import { connectionView, OFFLINE_AFTER_MS, UNSAVED_AFTER_MS } from './connectionState.ts';
+
+type Status = 'connecting' | 'connected' | 'disconnected';
 
 /**
- * Says when edits may not be reaching the server: "Reconnecting…" while the
- * socket is down, "Unsaved changes" when the server hasn't acknowledged
+ * Whether edits reach the server, always shown in the editor header: "Live",
+ * "Reconnecting…" while the socket is down, "Offline" once it has been down
+ * for ten seconds, "Unsaved changes" when the server hasn't acknowledged
  * changes for more than five seconds, and "Changes not saved" with Retry
  * when the server closed the connection because it couldn't store an update.
  */
 export function ConnectionStatus({ provider }: { provider: HocuspocusProvider }) {
   // The socket may already be up when this mounts: start from where it is.
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>(
-    () => (provider.configuration?.websocketProvider?.status as 'connecting' | 'connected' | 'disconnected' | undefined) ?? 'connecting',
+  const [status, setStatus] = useState<Status>(
+    () => (provider.configuration?.websocketProvider?.status as Status | undefined) ?? 'connecting',
   );
+  const [downSince, setDownSince] = useState<number | null>(null);
   const [lastCloseCode, setLastCloseCode] = useState<number | null>(null);
   const [unsyncedSince, setUnsyncedSince] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    const onStatus = ({ status: next }: { status: 'connecting' | 'connected' | 'disconnected' }) => setStatus(next);
+    const onStatus = ({ status: next }: { status: Status }) => {
+      setStatus(next);
+      setDownSince((since) => (next === 'connected' ? null : (since ?? Date.now())));
+    };
     const onClose = ({ event }: { event: { code: number } }) => {
       if (event.code === CLOSE_SAVE_FAILED || event.code === CLOSE_FORBIDDEN) setLastCloseCode(event.code);
     };
@@ -36,32 +43,44 @@ export function ConnectionStatus({ provider }: { provider: HocuspocusProvider })
     };
   }, [provider]);
 
-  // Re-evaluate once the unsaved threshold passes.
+  // Re-evaluate once a threshold passes.
   useEffect(() => {
     if (unsyncedSince === null) return;
     const timer = setTimeout(() => setNow(Date.now()), UNSAVED_AFTER_MS + 50);
     return () => clearTimeout(timer);
   }, [unsyncedSince]);
+  useEffect(() => {
+    if (downSince === null) return;
+    const timer = setTimeout(() => setNow(Date.now()), OFFLINE_AFTER_MS + 50);
+    return () => clearTimeout(timer);
+  }, [downSince]);
 
-  const view = connectionView({ status, lastCloseCode, unsyncedSince, now: Math.max(now, Date.now()) });
-  if (view.kind === 'ok') return null;
+  const view = connectionView({ status, lastCloseCode, unsyncedSince, downSince, now: Math.max(now, Date.now()) });
   const tone =
-    view.kind === 'save-failed' || view.kind === 'forbidden'
-      ? 'border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-900/20 dark:text-red-200'
-      : 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200';
+    view.kind === 'ok'
+      ? 'text-neutral-500 dark:text-neutral-400'
+      : view.kind === 'reconnecting' || view.kind === 'unsaved'
+        ? 'text-amber-700 dark:text-amber-300'
+        : 'text-red-700 dark:text-red-400';
+  const dot =
+    view.kind === 'ok' ? 'bg-emerald-500' : view.kind === 'reconnecting' || view.kind === 'unsaved' ? 'animate-pulse bg-amber-500' : 'bg-red-500';
   return (
-    <div role="status" data-connection={view.kind} className={`flex items-center gap-2 border-b px-4 py-1.5 text-xs ${tone}`}>
+    <div role="status" data-connection={view.kind} className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs font-medium ${tone}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden="true" />
+      {view.kind === 'ok' && <span>{t('connectionStatus.live')}</span>}
       {view.kind === 'reconnecting' && <span>{t('connectionStatus.reconnecting')}</span>}
+      {view.kind === 'offline' && <span>{t('connectionStatus.offline')}</span>}
       {view.kind === 'unsaved' && <span>{t('connectionStatus.unsaved')}</span>}
-      {view.kind === 'forbidden' && <span>{t('connectionStatus.forbidden')}</span>}
+      {view.kind === 'forbidden' && <span className="whitespace-normal">{t('connectionStatus.forbidden')}</span>}
       {view.kind === 'save-failed' && (
         <>
           <span>{t('connectionStatus.notSaved')}</span>
           <button
             type="button"
-            className="rounded border border-current px-2 py-0.5"
+            className="rounded border border-current px-1.5 py-0.5"
             onClick={() => {
               setLastCloseCode(null);
+              setDownSince(Date.now());
               void provider.connect();
             }}
           >

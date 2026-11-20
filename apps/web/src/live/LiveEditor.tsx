@@ -10,6 +10,7 @@ import { ThreadsSidebar } from '@blocknote/react';
 import { PrimerBlocksContext, primerSchema, type DataTableBlockProps, type WidgetBlockProps } from '@primer/blocks';
 import '@blocknote/core/fonts/inter.css';
 import '@blocknote/ariakit/style.css';
+import './editorTheme.css';
 import type { CatchUpSince, DocFileUploadResponse, Target, ViewerRole } from '@polygonlabs/primer-api-types';
 import { api } from '../lib/fetch.ts';
 import { ConnectionStatus } from './ConnectionStatus.tsx';
@@ -24,8 +25,9 @@ import { MAIN_TAB, tabFragmentName } from './tabs.ts';
 import { PrimerThreadStore } from './PrimerThreadStore.ts';
 import { commentDeleteGuard, type HeldDelete } from './commentDeleteGuard.ts';
 import { DeleteCommentedDialog } from './DeleteCommentedDialog.tsx';
-import { useThreadEvents } from './threadEvents.ts';
+import { relayLiveEvents, useThreadEvents } from './threadEvents.ts';
 import { SuggestionsPanel } from './SuggestionsPanel.tsx';
+import { SuggestDraft, type DraftBlock } from './SuggestDraft.tsx';
 import { ThreadActions } from './ThreadActions.tsx';
 import { CatchUpPanel, ChangeHighlights, useCheckpointChanges } from './changes.tsx';
 import { useBlockServices, type ChoiceStore } from './blockServices.ts';
@@ -73,6 +75,7 @@ export default function LiveEditor(props: LiveEditorProps) {
 
 function LiveEditorView(props: LiveEditorProps & { live: LiveProvider }) {
   const tabs = useTabs(props.live.doc);
+  useEffect(() => relayLiveEvents(props.documentId, props.live.provider), [props.documentId, props.live.provider]);
   const [selected, setSelected] = useState(MAIN_TAB);
   // A tab someone else deleted falls back to the first.
   const active = tabs.some((t) => t.id === selected) ? selected : MAIN_TAB;
@@ -104,7 +107,6 @@ function LiveEditorView(props: LiveEditorProps & { live: LiveProvider }) {
   return (
     <PrimerBlocksContext.Provider value={withPages}>
       <div className="flex h-full flex-col" data-live-editor={props.documentId}>
-        <ConnectionStatus provider={props.live.provider} />
         <AgentStatus provider={props.live.provider} />
         <TabStrip doc={props.live.doc} tabs={tabs} active={active} onSelect={setSelected} readOnly={props.readOnly} />
         {since && <CatchUpPanel documentId={props.documentId} since={since} onBlocks={setCatchUp} />}
@@ -137,6 +139,10 @@ function TabEditor({
   const [suggestionCount, setSuggestionCount] = useState(0);
   const [filter, setFilter] = useState<'open' | 'resolved' | 'all'>('open');
   const [held, setHeld] = useState<HeldDelete | null>(null);
+  // Suggesting: the tab as it was when suggesting began, edited as a draft.
+  const [draftBase, setDraftBase] = useState<DraftBlock[] | null>(null);
+  const [sentNote, setSentNote] = useState<string | null>(null);
+  const canSuggest = role !== 'stranger';
   const threadStore = useMemo(
     () =>
       new PrimerThreadStore(documentId, tabId, {
@@ -203,32 +209,64 @@ function TabEditor({
 
   return (
     <>
-      <div className="flex items-center justify-end gap-2 px-4 pt-2">
-        <ToolbarToggle pressed={commentsOpen} onToggle={() => setCommentsOpen((open) => !open)}>
-          {t('liveEditor.comments')}
-        </ToolbarToggle>
-        <ToolbarToggle pressed={suggestionsOpen} onToggle={() => setSuggestionsOpen((open) => !open)}>
-          {suggestionCount > 0 ? t('liveEditor.suggestionsCount', { count: suggestionCount }) : t('liveEditor.suggestions')}
-        </ToolbarToggle>
-        <ToolbarToggle pressed={decisionsOpen} onToggle={() => setDecisionsOpen((open) => !open)}>
-          {t('liveEditor.decisions')}
-        </ToolbarToggle>
-        <ToolbarToggle pressed={changesOn} onToggle={() => setChangesOn((on) => !on)}>
-          {t('liveEditor.changes')}
-        </ToolbarToggle>
-        <ToolbarToggle pressed={historyOpen} onToggle={() => setHistoryOpen((open) => !open)}>
-          {t('liveEditor.history')}
-        </ToolbarToggle>
+      <div className="flex min-h-10 items-center gap-2 border-b border-neutral-200 px-3 py-1.5 sm:px-4 dark:border-neutral-800">
+        {canSuggest && (
+          <ModeSwitch
+            suggesting={draftBase !== null}
+            canEdit={!readOnly}
+            onChange={(suggest) => {
+              setSentNote(null);
+              setDraftBase(suggest ? (editor.document as DraftBlock[]) : null);
+            }}
+          />
+        )}
+        <ConnectionStatus provider={live.provider} />
+        {sentNote && (
+          <span role="status" className="hidden truncate text-xs text-emerald-700 sm:inline dark:text-emerald-400">
+            {sentNote}
+          </span>
+        )}
+        <div className="ml-auto flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+          <ToolbarToggle pressed={commentsOpen} onToggle={() => setCommentsOpen((open) => !open)}>
+            {t('liveEditor.comments')}
+          </ToolbarToggle>
+          <ToolbarToggle pressed={suggestionsOpen} onToggle={() => setSuggestionsOpen((open) => !open)}>
+            {suggestionCount > 0 ? t('liveEditor.suggestionsCount', { count: suggestionCount }) : t('liveEditor.suggestions')}
+          </ToolbarToggle>
+          <ToolbarToggle pressed={decisionsOpen} onToggle={() => setDecisionsOpen((open) => !open)}>
+            {t('liveEditor.decisions')}
+          </ToolbarToggle>
+          <ToolbarToggle pressed={changesOn} onToggle={() => setChangesOn((on) => !on)}>
+            {t('liveEditor.changes')}
+          </ToolbarToggle>
+          <ToolbarToggle pressed={historyOpen} onToggle={() => setHistoryOpen((open) => !open)}>
+            {t('liveEditor.history')}
+          </ToolbarToggle>
+        </div>
       </div>
       <ChangeHighlights tone="catchup" blockIds={catchUp.filter((b) => b.tabId === tabId).map((b) => b.blockId)} />
       {sinceCheckpoint && <ChangeHighlights tone="checkpoint" blockIds={sinceCheckpoint} />}
       <BlockNoteView editor={editor} editable={!readOnly} theme={theme} renderEditor={false} slashMenu={false} className="flex min-h-0 flex-1">
         <ChipMenus editor={editor} slashItems={primerSlashItems(editor)} />
-        <div className="min-w-0 flex-1 overflow-y-auto py-4">
+        <div className={`min-w-0 flex-1 overflow-y-auto py-4 ${draftBase ? 'hidden' : ''}`}>
           <BlockNoteViewEditor />
         </div>
+        {draftBase && (
+          <SuggestDraft
+            documentId={documentId}
+            tabId={tabId}
+            base={draftBase}
+            theme={theme}
+            onDiscard={() => setDraftBase(null)}
+            onSent={(count) => {
+              setDraftBase(null);
+              setSentNote(t('suggestDraft.sent', { count }));
+              setSuggestionsOpen(true);
+            }}
+          />
+        )}
         {commentsOpen && (
-          <div className="w-80 shrink-0 overflow-y-auto border-l border-neutral-200 p-2 dark:border-neutral-800" data-threads-sidebar>
+          <div className={`${PANEL} p-2`} data-threads-sidebar>
             <select
               aria-label={t('liveEditor.showComments')}
               value={filter}
@@ -245,7 +283,7 @@ function TabEditor({
         )}
         <div
           hidden={!suggestionsOpen}
-          className="w-80 shrink-0 overflow-y-auto border-l border-neutral-200 p-2 dark:border-neutral-800"
+          className={`${PANEL} p-2`}
         >
           <SuggestionsPanel
             documentId={documentId}
@@ -256,12 +294,12 @@ function TabEditor({
           />
         </div>
         {decisionsOpen && (
-          <div className="w-80 shrink-0 overflow-y-auto border-l border-neutral-200 dark:border-neutral-800">
+          <div className={PANEL}>
             <DecisionRegister documentId={documentId} store={store} onClose={() => setDecisionsOpen(false)} />
           </div>
         )}
         {historyOpen && (
-          <div className="w-80 shrink-0 overflow-y-auto border-l border-neutral-200 dark:border-neutral-800">
+          <div className={PANEL}>
             <VersioningSidebar onClose={() => setHistoryOpen(false)} />
           </div>
         )}
@@ -271,6 +309,10 @@ function TabEditor({
   );
 }
 
+/** A side panel: beside the editor, or a bottom sheet on a phone. */
+const PANEL =
+  'w-80 shrink-0 overflow-y-auto border-l border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:z-30 max-sm:h-[65vh] max-sm:w-auto max-sm:border-t max-sm:border-l-0 max-sm:shadow-2xl';
+
 /** One of the toolbar's panel toggles. */
 function ToolbarToggle({ pressed, onToggle, children }: { pressed: boolean; onToggle: () => void; children: ReactNode }) {
   return (
@@ -278,10 +320,44 @@ function ToolbarToggle({ pressed, onToggle, children }: { pressed: boolean; onTo
       type="button"
       onClick={onToggle}
       aria-pressed={pressed}
-      className="h-7 rounded border border-neutral-300 px-3 text-xs text-neutral-700 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+      className="h-7 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 aria-pressed:bg-violet-50 aria-pressed:text-violet-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100 dark:aria-pressed:bg-violet-500/15 dark:aria-pressed:text-violet-300"
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * Editing | Suggesting. Suggesting turns edits into proposals that the owner
+ * or an editor accepts or rejects; people who can't edit see Viewing instead
+ * of Editing, and can still suggest.
+ */
+function ModeSwitch({ suggesting, canEdit, onChange }: { suggesting: boolean; canEdit: boolean; onChange: (suggest: boolean) => void }) {
+  const segment = 'inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded px-2.5 text-xs font-medium transition-colors';
+  return (
+    <div role="radiogroup" aria-label={t('liveEditor.modeLabel')} className="inline-flex shrink-0 rounded-md border border-neutral-200 bg-neutral-100 p-0.5 dark:border-neutral-800 dark:bg-neutral-900">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={!suggesting}
+        title={canEdit ? t('liveEditor.modeEditingHint') : t('liveEditor.modeViewingHint')}
+        onClick={() => onChange(false)}
+        className={`${segment} ${!suggesting ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-white' : 'text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100'}`}
+      >
+        {canEdit ? t('liveEditor.modeEditing') : t('liveEditor.modeViewing')}
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={suggesting}
+        title={t('liveEditor.modeSuggestingHint')}
+        onClick={() => onChange(true)}
+        className={`${segment} ${suggesting ? 'bg-emerald-600 text-white shadow-sm dark:bg-emerald-500 dark:text-emerald-950' : 'text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100'}`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${suggesting ? 'bg-white dark:bg-emerald-950' : 'bg-emerald-500'}`} aria-hidden="true" />
+        {t('liveEditor.modeSuggesting')}
+      </button>
+    </div>
   );
 }
 

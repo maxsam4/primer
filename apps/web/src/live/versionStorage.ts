@@ -7,6 +7,7 @@ import type {
 } from '@blocknote/core/extensions';
 import type { CheckpointResponse, VersionsListResponse } from '@polygonlabs/primer-api-types';
 import { api } from '../lib/fetch.ts';
+import { t } from '../i18n/index.ts';
 
 /**
  * BlockNote's version history over Primer's checkpoints. Each checkpoint is a
@@ -40,7 +41,7 @@ export class PrimerVersionStorage implements VersionStorage<Uint8Array> {
         snapshots: body.versions.map((v) => ({
           id: v.id,
           createdAt: Date.parse(v.createdAt),
-          name: v.versionNote ?? `Checkpoint ${v.versionNumber}`,
+          name: v.versionNote ?? t(v.automatic ? 'liveEditor.autoCheckpointName' : 'liveEditor.checkpointName', { number: v.versionNumber }),
           metadata: { versionNumber: v.versionNumber },
         })),
       },
@@ -72,7 +73,7 @@ export class PrimerVersionStorage implements VersionStorage<Uint8Array> {
       value: {
         id: checkpoint.versionId,
         createdAt: Date.now(),
-        name: name ?? `Checkpoint ${checkpoint.versionNumber}`,
+        name: name ?? t('liveEditor.checkpointName', { number: checkpoint.versionNumber }),
         metadata: { versionNumber: checkpoint.versionNumber },
       },
     };

@@ -422,8 +422,9 @@ export async function transactionWithEvents<T>(
   fn: (tx: Tx, emit: EmitLifecycle) => Promise<T>,
 ): Promise<T> {
   let touched: Touched = [];
+  let emitted: LifecycleEvent[] = [];
   const result = await db.transaction(async (tx) => {
-    const emitted: LifecycleEvent[] = [];
+    emitted = [];
     touched = [];
     const value = await fn(tx, (event) => {
       emitted.push(event as LifecycleEvent);
@@ -445,7 +446,17 @@ export async function transactionWithEvents<T>(
     return value;
   });
   notifyEventsCommitted(touched);
+  for (const handler of lifecycleHandlers) for (const event of emitted) handler(event);
   return result;
+}
+
+const lifecycleHandlers = new Set<(event: LifecycleEvent) => void>();
+
+/** Runs after each lifecycle event commits (the live server relays some to
+ *  a document's open editors: live/instance.ts). */
+export function onLifecycleCommitted(handler: (event: LifecycleEvent) => void): () => void {
+  lifecycleHandlers.add(handler);
+  return () => lifecycleHandlers.delete(handler);
 }
 
 // ───────────────────────── Filters ─────────────────────────

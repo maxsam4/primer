@@ -190,6 +190,13 @@
       "when": 1795126217945,
       "tag": "0026_widgets",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1795154195358,
+      "tag": "0027_auto_checkpoints",
+      "breakpoints": true
     }
   ]
 }

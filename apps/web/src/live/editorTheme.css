@@ -1,0 +1,217 @@
+/*
+ * BlockNote's Ariakit UI in Primer's tokens. Ariakit ships its own theme:
+ * bevelled buttons (stacked inset box-shadows), a toolbar frame with its own
+ * background and shadow (nested again inside the comment popover, around
+ * Save), and blue (#007acc) focus rings, selections and menus. BlockNote's
+ * --bn-colors-* reach only the editor surface, so those primitives ignored
+ * Primer's light and dark themes. This file restyles the primitives once,
+ * here; it loads after Ariakit's CSS and every rule is prefixed with `html`
+ * to outrank Ariakit's (`:where(.dark, …)` adds no specificity).
+ */
+:root {
+  --pe-surface: #ffffff;
+  --pe-raised: #ffffff;
+  --pe-hover: #f5f5f5;
+  --pe-border: #e5e5e5;
+  --pe-border-strong: #d4d4d4;
+  --pe-text: #171717;
+  --pe-muted: #737373;
+  --pe-accent: #6d28d9;
+  --pe-accent-hover: #5b21b6;
+  --pe-accent-soft: #f3efff;
+  --pe-accent-text: #5b21b6;
+  --pe-ring: rgb(109 40 217 / 0.4);
+  --pe-tooltip: #171717;
+  --pe-tooltip-text: #fafafa;
+  --pe-shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 6px 20px -4px rgb(0 0 0 / 0.12);
+  --pe-suggest: #047857;
+  --pe-suggest-soft: #ecfdf5;
+}
+html.dark {
+  --pe-surface: #0a0a0a;
+  --pe-raised: #171717;
+  --pe-hover: #262626;
+  --pe-border: #2a2a2a;
+  --pe-border-strong: #404040;
+  --pe-text: #e5e5e5;
+  --pe-muted: #a3a3a3;
+  --pe-accent: #7c3aed;
+  --pe-accent-hover: #8b5cf6;
+  --pe-accent-soft: rgb(139 92 246 / 0.18);
+  --pe-accent-text: #c4b5fd;
+  --pe-ring: rgb(167 139 250 / 0.55);
+  --pe-tooltip: #f5f5f5;
+  --pe-tooltip-text: #171717;
+  --pe-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px -6px rgb(0 0 0 / 0.7);
+  --pe-suggest: #34d399;
+  --pe-suggest-soft: rgb(16 185 129 / 0.14);
+}
+
+/* Surfaces: toolbars, popovers, menus, comment cards. */
+html .bn-ak-toolbar {
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--pe-border);
+  border-radius: 8px;
+  background-color: var(--pe-raised);
+  box-shadow: var(--pe-shadow);
+}
+html :is(.bn-ak-popover, .bn-ak-menu, .bn-ak-hovercard) {
+  border: 1px solid var(--pe-border);
+  border-radius: 8px;
+  background-color: var(--pe-raised);
+  color: var(--pe-text);
+  box-shadow: var(--pe-shadow);
+}
+html .bn-ak-hovercard {
+  gap: 8px;
+  width: 320px;
+  padding: 12px;
+}
+/* A toolbar inside a card (comment actions around Save) has no frame of its own. */
+html :is(.bn-ak-hovercard, .bn-ak-popover, .bn-thread, .bn-threads-sidebar) .bn-ak-toolbar {
+  padding: 0;
+  border: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+html .bn-ak-separator {
+  border-color: var(--pe-border);
+}
+html .bn-ak-tooltip {
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 5px;
+  background-color: var(--pe-tooltip);
+  color: var(--pe-tooltip-text);
+  font-size: 12px;
+  box-shadow: none;
+}
+
+/* Buttons: flat, accent tint when on, one focus ring. */
+html .bn-ak-button {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--pe-text);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  outline: none;
+}
+html .bn-ak-button:not(:active):hover {
+  background-color: var(--pe-hover);
+}
+html .bn-ak-button:is(:active, [data-active]),
+html .bn-toolbar .bn-ak-button[data-selected] {
+  padding-top: 0;
+  background-color: var(--pe-accent-soft);
+  color: var(--pe-accent-text);
+  box-shadow: none;
+}
+html .bn-ak-button:is([data-focus-visible], :focus-visible) {
+  outline: 2px solid var(--pe-ring);
+  outline-offset: 1px;
+}
+html .bn-ak-button:disabled,
+html .bn-ak-button[aria-disabled='true'] {
+  color: var(--pe-muted);
+  opacity: 0.6;
+}
+html :is(.bn-ak-primary, .bn-comment-actions .bn-ak-button:last-of-type) {
+  padding: 0 12px;
+  background-color: var(--pe-accent);
+  color: #ffffff;
+}
+html :is(.bn-ak-primary, .bn-comment-actions .bn-ak-button:last-of-type):not(:active):hover {
+  background-color: var(--pe-accent-hover);
+}
+html .bn-comment-actions .bn-ak-button:not(:last-of-type) {
+  border: 1px solid var(--pe-border-strong);
+}
+
+/* Inputs (link and comment fields). */
+html .bn-ak-input,
+html .bn-ariakit .bn-combobox .bn-ak-input-wrapper {
+  border: 1px solid var(--pe-border-strong);
+  border-radius: 6px;
+  background-color: var(--pe-surface);
+  color: var(--pe-text);
+  box-shadow: none;
+}
+html :is(.bn-ak-input, .bn-ak-popover, .bn-ak-hovercard):is(:focus-visible, [data-focus-visible]) {
+  outline: 2px solid var(--pe-ring);
+  outline-offset: -1px;
+}
+
+/* Menus (block type, colours, side menu) and selects. */
+html :is(.bn-ak-menu-item, .bn-ak-select-item) {
+  border-radius: 5px;
+  color: var(--pe-text);
+}
+html :is(.bn-ak-menu-item, .bn-ak-select-item):is([data-active-item], [aria-selected='true'], :hover) {
+  background-color: var(--pe-hover);
+  color: var(--pe-text);
+}
+html .bn-ak-menu-item:is(:active, [data-active]) {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background-color: var(--pe-accent-soft);
+}
+html :is(.bn-ak-link, .bn-ak-anchor) {
+  color: var(--pe-accent-text);
+}
+html .bn-ak-tab[aria-selected='true'],
+html .bn-ak-tab:hover[aria-selected='true'] {
+  background-color: var(--pe-accent);
+  color: #ffffff;
+}
+
+/* History (versioning sidebar) and the comments sidebar. */
+html .bn-ariakit .bn-snapshot {
+  border: 1px solid var(--pe-border);
+  border-radius: 8px;
+  background-color: var(--pe-raised);
+  color: var(--pe-text);
+  box-shadow: none;
+}
+html .bn-ariakit .bn-snapshot:hover {
+  background-color: var(--pe-hover);
+}
+html .bn-ariakit .bn-snapshot.selected,
+html .bn-ariakit .bn-snapshot.selected:hover {
+  border-color: var(--pe-accent);
+  background-color: var(--pe-accent-soft);
+  color: var(--pe-text);
+}
+html .bn-ariakit :is(.bn-snapshot-comparison-source, .bn-snapshot.comparing) {
+  border-color: var(--pe-accent);
+  box-shadow: 0 0 0 1px var(--pe-accent);
+}
+html .bn-ariakit .bn-snapshot-comparing-to {
+  color: var(--pe-accent-text);
+}
+html .bn-ariakit .bn-snapshot:focus-visible {
+  outline: 2px solid var(--pe-ring);
+}
+html .bn-threads-sidebar .bn-thread {
+  border: 1px solid var(--pe-border);
+  border-radius: 8px;
+  background-color: var(--pe-raised);
+  box-shadow: none;
+}
+html .bn-threads-sidebar .bn-thread.selected {
+  border: 1px solid var(--pe-accent);
+  background-color: var(--pe-raised);
+  box-shadow: 0 0 0 1px var(--pe-accent);
+}
+
+/* Editor surface: the side menu (drag handle, +) sits quietly at the margin. */
+html .bn-side-menu .bn-ak-button {
+  height: 24px;
+  min-width: 22px;
+  padding: 0 2px;
+  color: var(--pe-muted);
+}

@@ -127,7 +127,10 @@ const shutdown = async () => {
   await stopPurge();
   hub.close();
   if ('close' in server) {
-    (server as { close: (cb?: () => void) => void }).close(() => process.exit(0));
+    const http = server as { close: (cb?: () => void) => void; closeAllConnections?: () => void };
+    http.close(() => process.exit(0));
+    // Open event streams would otherwise hold the exit; browsers reconnect.
+    http.closeAllConnections?.();
   } else {
     process.exit(0);
   }

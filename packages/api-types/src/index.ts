@@ -463,6 +463,8 @@ export interface VersionSummaryDTO {
   /** A checkpoint's docVersion: read `GET /api/documents/:docId/live?since=`
    *  with it for what changed after the checkpoint. */
   docVersion?: number;
+  /** A checkpoint the server saved on its own once edits settled. */
+  automatic?: true;
 }
 
 export interface VersionsListResponse {
@@ -682,6 +684,10 @@ export interface ApplyOpsRequest {
   /** `suggest` turns a stale op into a suggestion (status `suggested`)
    *  instead of a conflict. */
   onConflict?: 'refuse' | 'suggest';
+  /** `suggest` stores every op as a suggestion for the owner or an editor to
+   *  accept or reject (status `suggested`). A person who may comment, but not
+   *  edit, can send ops only this way. */
+  mode?: 'suggest';
   /** Allow removing text that open comment threads are on. */
   allowCommentedDelete?: boolean;
 }
@@ -831,6 +837,9 @@ export interface CheckpointResponse {
   versionId: string;
   versionNumber: number;
   docVersion: number;
+  /** The previous checkpoint, when no one edited the content between it and
+   *  this one. */
+  unchangedSince?: number;
 }
 
 /** POST /api/versions/:versionId/restore: the restore is a new edit. */

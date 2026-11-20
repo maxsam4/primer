@@ -135,6 +135,7 @@ describe('LiveEditor', () => {
     expect(shown()).toBe('reconnecting');
     await emit('status', { status: 'connected' });
     expect(shown()).toBe('ok');
+    expect(el.textContent).toContain('Live');
 
     // Unacknowledged changes are only "unsaved" after five seconds.
     await emit('unsyncedChanges', { number: 2 });
@@ -147,6 +148,9 @@ describe('LiveEditor', () => {
 
     await emit('status', { status: 'disconnected' });
     expect(el.textContent).toContain('Reconnecting…');
+    // Down for more than ten seconds: offline, not a blip.
+    await act(async () => vi.advanceTimersByTime(10_100));
+    expect(shown()).toBe('offline');
 
     // The server couldn't store an update: say so, and offer to retry.
     await emit('close', { event: { code: 4500 } });

@@ -64,21 +64,25 @@ type Prepared =
  * `onConflict: 'suggest'` turns a stale op into a stored suggestion instead
  * of a conflict. An agent in suggest mode (`effectiveAgentMode`, decided in
  * the pipeline), or a run whose requester can't edit, gets every op stored as
- * a suggestion: status `suggested` with its `suggestionId`.
+ * a suggestion: status `suggested` with its `suggestionId`, as does a batch
+ * sent with `mode: 'suggest'` (people suggesting, including commenters).
  */
 export async function applyOps(documentId: string, actor: AuthUser, raw: unknown): Promise<ApplyOpsResult> {
   const doc = await readableLiveDoc(documentId, actor);
   if (!doc) {
     return { ok: false, status: 404, refusal: refusal('not_found', 'Live document not found.', 'Check the document id.') };
   }
-  if (!canEdit(doc.role)) {
+  const req = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  // `mode: 'suggest'` stores every op as a suggestion: a person suggesting
+  // instead of editing, which anyone who may comment can do.
+  const suggestOnly = req.mode === 'suggest';
+  if (!canEdit(doc.role) && !(suggestOnly && actor.kind === 'person')) {
     return {
       ok: false,
       status: 403,
       refusal: refusal('forbidden', 'Only the owner and editors can edit this document.', 'Comment instead (primer_create_thread).'),
     };
   }
-  const req = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   if (!Array.isArray(req.ops) || req.ops.length === 0 || req.ops.length > MAX_OPS) {
     return reject([], `ops must be a list of 1–${MAX_OPS} ops.`);
   }
@@ -131,7 +135,7 @@ export async function applyOps(documentId: string, actor: AuthUser, raw: unknown
   }
   let error: string | null = null;
   try {
-    return await applyScoped(documentId, actor, runId, direct, { prepared, onConflict, allowCommentedDelete });
+    return await applyScoped(documentId, actor, runId, direct, { prepared, onConflict, allowCommentedDelete, suggestOnly });
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     throw err;
@@ -145,7 +149,12 @@ async function applyScoped(
   actor: AuthUser,
   runId: string | null,
   direct: boolean,
-  { prepared, onConflict, allowCommentedDelete }: { prepared: Prepared[]; onConflict: 'refuse' | 'suggest'; allowCommentedDelete: boolean },
+  {
+    prepared,
+    onConflict,
+    allowCommentedDelete,
+    suggestOnly,
+  }: { prepared: Prepared[]; onConflict: 'refuse' | 'suggest'; allowCommentedDelete: boolean; suggestOnly: boolean },
 ): Promise<ApplyOpsResult> {
   let hooks: RunHooks | null = null;
   if (runId !== null) {
@@ -178,7 +187,7 @@ async function applyScoped(
     onConflict,
     // A run whose requester can't edit only suggests; the pipeline itself
     // makes an agent in suggest mode suggest.
-    mode: hooks?.suggestOnly ? 'suggest' : undefined,
+    mode: suggestOnly || hooks?.suggestOnly ? 'suggest' : undefined,
     guard: async (doc, { suggesting }) => {
       // Threads first: the dry run must refuse what the real apply refuses.
       for (const id of await openThreadIds(documentId)) open.add(id);

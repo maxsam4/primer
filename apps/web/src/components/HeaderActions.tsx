@@ -9,6 +9,8 @@ import { useCopyDocument, useDocument, useEditDocument, useProposeBranch } from 
 export interface ActionFeedback {
   kind: 'success' | 'error';
   message: string;
+  /** A place to go from the message (e.g. the checkpoint just saved). */
+  link?: { label: string; to: string };
 }
 
 interface Props {
@@ -61,6 +63,7 @@ export function HeaderActions({
 }: Props) {
   const [menuState, setMenuState] = useState<MenuState>('closed');
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
+  const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -97,7 +100,7 @@ export function HeaderActions({
 
   function showFeedback(
     fb: ActionFeedback,
-    dismissMs: number = fb.kind === 'error' ? 3000 : 2000,
+    dismissMs: number = fb.link ? 6000 : fb.kind === 'error' ? 5000 : 3000,
   ) {
     if (feedbackTimerRef.current !== null) clearTimeout(feedbackTimerRef.current);
     setFeedback(fb);
@@ -195,10 +198,20 @@ export function HeaderActions({
       {variant === 'desktop' && onSaveCheckpoint && (
         <button
           type="button"
-          onClick={() => void onSaveCheckpoint().then(showFeedback, () => showFeedback({ kind: 'error', message: t('headerActions.saveCheckpointFailed') }))}
-          className="inline-flex h-7 items-center rounded border border-neutral-300 bg-white px-2.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          disabled={savingCheckpoint}
+          aria-busy={savingCheckpoint}
+          onClick={() => {
+            setSavingCheckpoint(true);
+            void onSaveCheckpoint()
+              .then(showFeedback, () => showFeedback({ kind: 'error', message: t('headerActions.saveCheckpointFailed') }))
+              .finally(() => mountedRef.current && setSavingCheckpoint(false));
+          }}
+          className="inline-flex h-7 items-center gap-1.5 rounded border border-neutral-300 bg-white px-2.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-wait disabled:opacity-70 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800"
         >
-          {t('headerActions.saveCheckpoint')}
+          {savingCheckpoint && (
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent" aria-hidden="true" />
+          )}
+          {savingCheckpoint ? t('headerActions.savingCheckpoint') : t('headerActions.saveCheckpoint')}
         </button>
       )}
       {variant === 'desktop' && isUploader && (
@@ -301,15 +314,31 @@ export function HeaderActions({
         )}
         {feedback && (
           <div
-            role="status"
+            role={feedback.kind === 'error' ? 'alert' : 'status'}
             aria-live="polite"
-            className={`absolute right-0 z-10 mt-1 rounded border px-2 py-1 text-xs shadow-md ${
+            className={`fixed right-4 bottom-4 z-50 flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-lg border px-3 py-2 text-sm shadow-lg ${
               feedback.kind === 'success'
-                ? 'border-neutral-200 bg-white text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-300'
-                : 'border-red-300 bg-red-50 text-red-700 dark:border-red-700 dark:bg-red-900/20 dark:text-red-400'
+                ? 'border-neutral-200 bg-white text-neutral-800 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100'
+                : 'border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-300'
             }`}
           >
-            {feedback.message}
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${feedback.kind === 'success' ? 'bg-emerald-500' : 'bg-red-500'}`}
+              aria-hidden="true"
+            />
+            <span className="min-w-0">{feedback.message}</span>
+            {feedback.link && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedback(null);
+                  navigate(feedback.link!.to);
+                }}
+                className="shrink-0 font-medium text-violet-700 hover:underline dark:text-violet-300"
+              >
+                {feedback.link.label}
+              </button>
+            )}
           </div>
         )}
       </div>

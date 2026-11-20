@@ -6,6 +6,25 @@ import { logger } from '../logger.ts';
 import { sanitizeClientAwareness } from './awareness.ts';
 import { SYSTEM_ORIGIN, originOf, type LiveOrigin } from './origin.ts';
 import { cancelOrphanSync, scheduleOrphanSync } from './orphans.ts';
+import { onLifecycleCommitted } from '../lib/events.ts';
+
+/** Lifecycle events an open editor follows (comments, threads,
+ *  suggestions), relayed to the document's peers as a stateless message
+ *  `{ type: 'primer.event', event: { type } }` once committed. Every peer may
+ *  read the document, and the message carries only the type: the editor
+ *  refetches. Proxies may hold back the event stream; the socket is live. */
+const RELAYED = /^(comment|thread|suggestion)\./;
+
+onLifecycleCommitted((event) => {
+  if (!RELAYED.test(event.type)) return;
+  instance?.documents.get(liveDocName(event.documentId))?.broadcastStateless(
+    JSON.stringify({ type: 'primer.event', event: { type: event.type } }),
+  );
+});
+
+/** A peer's liveness probe and the answer (stateless messages). */
+export const LIVENESS_PING = 'primer:ping';
+export const LIVENESS_PONG = 'primer:pong';
 
 const NAME = /^doc:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
@@ -94,6 +113,11 @@ export function liveInstance(): Hocuspocus {
         cancelOrphanSync(documentId);
         void detach();
       });
+    },
+    // Liveness: a browser probes its connection (web live/provider.ts), since
+    // through proxies a server that went away can leave the socket open.
+    async onStateless({ connection, payload }) {
+      if (payload === LIVENESS_PING) connection.sendStateless(LIVENESS_PONG);
     },
     async beforeUnloadDocument({ document }) {
       await persistedUpTo(document).catch(() => undefined);

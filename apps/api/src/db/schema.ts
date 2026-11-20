@@ -84,6 +84,9 @@ export const versions = pgTable(
     // and the doc_updates id the bundle was captured at.
     bundleKey: text('bundle_key'),
     docVersion: bigint('doc_version', { mode: 'number' }),
+    // A checkpoint the live server made on its own once edits settled
+    // (live/autoCheckpoint.ts), not one someone saved.
+    automatic: boolean('automatic').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({

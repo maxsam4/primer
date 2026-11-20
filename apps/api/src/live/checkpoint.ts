@@ -9,7 +9,7 @@ import { transactionWithEvents } from '../lib/events.ts';
 import { effectiveAgentMode } from '../lib/permissions.ts';
 import type { Storage } from '../storage/types.ts';
 import { deleteBundle, loadBundleDoc, renderBundle } from './bundle.ts';
-import { liveDocName, liveInstance } from './instance.ts';
+import { liveDocName, liveInstance, withLiveDocument } from './instance.ts';
 import { originFor } from './origin.ts';
 import { persistedUpTo } from './persist.ts';
 import { applyPlan, type PlannedEdit } from './pipeline.ts';
@@ -47,8 +47,34 @@ export async function createCheckpoint(
   documentId: string,
   actor: AuthUser,
   note: string | null,
+  opts: { automatic?: boolean } = {},
 ): Promise<CheckpointResponse> {
-  return writeCheckpoint(storage, documentId, actor, note, await captureState(documentId, actor));
+  return writeCheckpoint(storage, documentId, actor, note, await captureState(documentId, actor), undefined, opts);
+}
+
+/**
+ * The latest checkpoint's number when no one edited the content after it
+ * (comment marks and system writes change no content); else null. A document
+ * with no live checkpoint yet has changed. Records and comments aren't
+ * content: a checkpoint still freezes them.
+ */
+export async function contentUnchangedSince(documentId: string): Promise<number | null> {
+  // Edits still queued for storage count: wait for them.
+  await withLiveDocument(documentId, (doc) => persistedUpTo(doc));
+  const [latest] = (await db.execute(sql`
+    SELECT id, version_number AS "versionNumber", doc_version AS "docVersion"
+      FROM versions WHERE document_id = ${documentId}
+     ORDER BY version_number DESC LIMIT 1
+  `)) as unknown as { id: string; versionNumber: number; docVersion: number | string | null }[];
+  if (!latest || latest.docVersion === null) return null;
+  const docVersion = Number(latest.docVersion);
+  const [edit] = (await db.execute(sql`
+    SELECT 1 FROM doc_updates
+     WHERE document_id = ${documentId} AND id > ${docVersion}
+       AND actor_id IS NOT NULL AND touched <> '{}'::text[]
+     LIMIT 1
+  `)) as unknown as unknown[];
+  return edit ? null : latest.versionNumber;
 }
 
 /**
@@ -63,6 +89,7 @@ export async function writeCheckpoint(
   captured: CapturedState,
   /** A republish: the uploaded file, kept with the version. */
   original?: { versionId: string; originalKey: string; sourceFormat: 'markdown' | 'text' | 'html' },
+  opts: { automatic?: boolean } = {},
 ): Promise<CheckpointResponse> {
   const [doc] = await db.select({ title: documents.title }).from(documents).where(eq(documents.id, documentId));
   const versionId = original?.versionId ?? uuidv7();
@@ -84,6 +111,7 @@ export async function writeCheckpoint(
         versionNote: note,
         bundleKey: bundle.bundleKey,
         docVersion: captured.docVersion,
+        automatic: opts.automatic ?? false,
         ...(original ? { originalKey: original.originalKey, sourceFormat: original.sourceFormat } : {}),
       });
       // Open threads stay listed on the checkpoint: anchored where their
@@ -100,7 +128,13 @@ export async function writeCheckpoint(
         versionId,
         actorId: actor.id,
         type: 'version.published',
-        payload: { document_id: documentId, version_id: versionId, number: next, author_id: actor.id },
+        payload: {
+          document_id: documentId,
+          version_id: versionId,
+          number: next,
+          author_id: actor.id,
+          ...(opts.automatic ? { automatic: true } : {}),
+        },
       });
       return next;
     });

@@ -824,7 +824,10 @@ function DocumentPageInner() {
     if (!res.ok) return { kind: 'error', message: t('document.saveCheckpointFailed') };
     const checkpoint = (await res.json()) as CheckpointResponse;
     await queryClient.invalidateQueries({ queryKey: ['versions', docId] });
-    return { kind: 'success', message: t('document.checkpointSaved', { number: checkpoint.versionNumber }) };
+    const link = { label: t('document.viewCheckpoint'), to: `/d/${docId}/v/${checkpoint.versionNumber}` };
+    return checkpoint.unchangedSince !== undefined
+      ? { kind: 'success', message: t('document.checkpointUnchanged', { number: checkpoint.versionNumber, previous: checkpoint.unchangedSince }), link }
+      : { kind: 'success', message: t('document.checkpointSaved', { number: checkpoint.versionNumber }), link };
   }
 
   function exportAs(format: 'markdown' | 'html' | 'print') {

@@ -1,0 +1,1 @@
+ALTER TABLE "versions" ADD COLUMN "automatic" boolean DEFAULT false NOT NULL;

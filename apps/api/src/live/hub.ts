@@ -159,6 +159,12 @@ export function createHub(deps: { resolver: UserResolver; appOrigin: string }): 
       clearInterval(timer);
       stopFailures();
       stopRecheck();
+      // Shutting down: close every live connection (1012, service restart)
+      // so browsers reconnect to the next server at once, instead of an
+      // exiting process keeping their sockets open.
+      for (const document of hocuspocus.documents.values()) {
+        for (const connection of document.getConnections()) closeConnection(connection, 1012, 'restart');
+      }
     },
   };
 }
