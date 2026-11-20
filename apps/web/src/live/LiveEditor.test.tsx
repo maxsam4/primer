@@ -9,6 +9,7 @@ import { BlockNoteEditor } from '@blocknote/core';
 import { blocksToYXmlFragment } from '@blocknote/core/yjs';
 import { primerSchema } from '@primer/blocks';
 import type { LiveProvider } from './provider.ts';
+import type { PrimerThreadStore } from './PrimerThreadStore.ts';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -33,6 +34,20 @@ vi.mock('./provider.ts', async (importOriginal) => ({
     return { provider, doc, destroy: () => provider.destroy() };
   },
 }));
+
+const stores: PrimerThreadStore[] = [];
+vi.mock('./PrimerThreadStore.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./PrimerThreadStore.ts')>();
+  return {
+    ...actual,
+    PrimerThreadStore: class extends actual.PrimerThreadStore {
+      constructor(...args: ConstructorParameters<typeof actual.PrimerThreadStore>) {
+        super(...args);
+        stores.push(this);
+      }
+    },
+  };
+});
 
 // jsdom lacks these; BlockNote's menus measure the page.
 globalThis.ResizeObserver ??= class {
@@ -76,7 +91,7 @@ describe('LiveEditor', () => {
   it('live document renders the editor and legacy renders the iframe', async () => {
     const { DocumentSurface } = await import('../routes/document.tsx');
     const frame = () => createElement('iframe', { title: 'legacy-frame' });
-    const props = { documentId: 'doc-1', readOnly: false, canVote: true, theme: 'light' as const, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, frame };
+    const props = { documentId: 'doc-1', readOnly: false, canVote: true, theme: 'light' as const, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, canComment: true, frame };
 
     const live = await render(createElement(DocumentSurface, { ...props, live: true }));
     await until(() => live.querySelector('[contenteditable="true"].bn-editor')?.textContent?.includes('Seeded from the Y.Doc') === true);
@@ -97,7 +112,7 @@ describe('LiveEditor', () => {
 
   it('one editor surface: one toolbar, each panel toggle once, in order', async () => {
     const { DocumentSurface } = await import('../routes/document.tsx');
-    const props = { documentId: 'doc-1', readOnly: false, canVote: true, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, frame: () => null, live: true, theme: 'light' as const };
+    const props = { documentId: 'doc-1', readOnly: false, canVote: true, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, canComment: true, frame: () => null, live: true, theme: 'light' as const };
     const live = await render(createElement(DocumentSurface, props));
     await until(() => live.querySelector('.bn-editor') !== null);
     const toggles = [...live.querySelectorAll('button[aria-pressed]')].map((b) => b.textContent);
@@ -106,9 +121,22 @@ describe('LiveEditor', () => {
     expect(live.querySelectorAll('.bn-editor')).toHaveLength(1);
   });
 
+  it('an organization reader without a collaborator row can comment', async () => {
+    const { DocumentSurface } = await import('../routes/document.tsx');
+    stores.length = 0;
+    const reader = await render(
+      createElement(DocumentSurface, { documentId: 'doc-1', readOnly: true, canVote: false, theme: 'light', userName: 'Bo', userId: 'u-bo', role: 'stranger', canComment: true, frame: () => null, live: true }),
+    );
+    await until(() => reader.querySelector('.bn-editor') !== null && stores.length > 0);
+    const store = stores[stores.length - 1]!;
+    expect(store.auth.canCreateThread()).toBe(true);
+    expect(store.auth.canAddComment({} as never)).toBe(true);
+    expect(store.auth.canAddReaction({} as never, '')).toBe(true);
+  });
+
   it('editor uses the dark theme when Primer is dark', async () => {
     const { DocumentSurface } = await import('../routes/document.tsx');
-    const props = { documentId: 'doc-1', readOnly: false, canVote: true, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, frame: () => null, live: true };
+    const props = { documentId: 'doc-1', readOnly: false, canVote: true, userName: 'Ana', userId: 'u-ana', role: 'owner' as const, canComment: true, frame: () => null, live: true };
     const dark = await render(createElement(DocumentSurface, { ...props, theme: 'dark' as const }));
     await until(() => dark.querySelector('.bn-editor') !== null);
     expect(dark.querySelector('.bn-container')!.getAttribute('data-color-scheme')).toBe('dark');

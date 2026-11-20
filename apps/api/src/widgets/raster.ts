@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,22 +13,22 @@ const FACES = ['Regular', 'Medium', 'Bold'];
 let fontFiles: string[] | null = null;
 
 /**
- * The widget font as TrueType files resvg can load. Roboto (Apache-2.0) ships
- * as WOFF in `roboto-fontface`, which the page loads too, so the server and
- * the page draw with the same face. WOFF 1.0 is the sfnt tables, each
- * zlib-compressed; this unpacks them once per process into the temp dir.
+ * The widget font as TrueType files resvg can load (the Node binding takes
+ * only file paths). Roboto (Apache-2.0) ships as WOFF in `roboto-fontface`,
+ * which the page loads too, so the server and the page draw with the same
+ * face. WOFF 1.0 is the sfnt tables, each zlib-compressed; this unpacks them
+ * once per process into a private directory of its own (mkdtemp: unique
+ * name, owner-only), created afresh and removed at exit.
  */
 function widgetFontFiles(): string[] {
   if (fontFiles) return fontFiles;
   const require = createRequire(import.meta.url);
-  const dir = join(tmpdir(), 'primer-widget-fonts');
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), 'primer-widget-fonts-'));
+  process.once('exit', () => rmSync(dir, { recursive: true, force: true }));
   fontFiles = FACES.map((face) => {
     const out = join(dir, `${WIDGET_FONT}-${face}.ttf`);
-    if (!existsSync(out)) {
-      const woff = readFileSync(require.resolve(`roboto-fontface/fonts/roboto/${WIDGET_FONT}-${face}.woff`));
-      writeFileSync(out, woffToSfnt(woff));
-    }
+    const woff = readFileSync(require.resolve(`roboto-fontface/fonts/roboto/${WIDGET_FONT}-${face}.woff`));
+    writeFileSync(out, woffToSfnt(woff), { flag: 'wx', mode: 0o600 });
     return out;
   });
   return fontFiles;

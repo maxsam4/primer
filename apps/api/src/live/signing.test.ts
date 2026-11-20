@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Storage } from '../storage/types.ts';
 
-describe('ensureSigningKey', () => {
+describe('loadSigningKey', () => {
   it('makes the key only when it is missing, never on another storage failure', async () => {
-    const { ensureSigningKey } = await import('./signing.ts');
+    const { loadSigningKey } = await import('./signing.ts');
     const put = vi.fn(async () => undefined);
     const down: Storage = {
       get: async () => {
@@ -12,7 +12,7 @@ describe('ensureSigningKey', () => {
       put,
       delete: async () => undefined,
     };
-    await expect(ensureSigningKey(down)).rejects.toThrow('storage unavailable');
+    await expect(loadSigningKey(down)).rejects.toThrow('storage unavailable');
     expect(put).not.toHaveBeenCalled();
 
     const missing: Storage = {
@@ -22,7 +22,7 @@ describe('ensureSigningKey', () => {
       put,
       delete: async () => undefined,
     };
-    await ensureSigningKey(missing);
+    await loadSigningKey(missing);
     expect(put).toHaveBeenCalledTimes(1);
   });
 });

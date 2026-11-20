@@ -52,7 +52,10 @@ This is the proposed direction for Primer's collaboration surface, for the maint
 - Persistence is Postgres `bytea` updates plus compacted snapshots.
 - Awareness carries cursors and agent status, which replaces the custom "working status" TTL.
 - Comments, per-viewer state and shared records stay **outside** the Y.Doc.
-- Start with one API instance. LISTEN/NOTIFY wake-ups come only when a second instance is added, and need reconnect catch-up.
+- **Deploy exactly one API process.** Open Y.Docs, the apply queue, live event fan-out and agent wake-ups are process-local. A second process would hold its own copy of a document and the two would diverge until reload.
+  - Run one replica, and roll out with a stop-then-start strategy (Kubernetes `strategy: Recreate`, Compose's default), never a rolling update that overlaps the old and new process.
+  - Clients reconnect on their own after the restart and catch up from Postgres.
+  - Scaling past one process needs cross-process wake-ups (LISTEN/NOTIFY) and document routing first; that is out of scope here.
 - **Versions are checkpoints.** A checkpoint stores the Y.Doc binary and a rendered export (Markdown for prose; HTML with splices for page blocks) at the same revision. Compare diffs the exports with the existing diff viewer.
   - Autosave is separate from publishing.
   - MCP reads choose live state or a checkpoint explicitly.

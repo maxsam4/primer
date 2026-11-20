@@ -121,6 +121,18 @@ const THEME_CSS =
   '.primer-widget svg{display:block;width:100%;height:auto}.primer-widget-dark{display:none}' +
   'html[data-theme="dark"] .primer-widget-light{display:none}html[data-theme="dark"] .primer-widget-dark{display:block}';
 
+/** Whether a widget block of a checkpoint's frozen state differs from what
+ *  is published for it now (a different hash, or no publish at all). */
+export async function widgetsChangedSince(frozen: Y.Doc, documentId: string): Promise<boolean> {
+  const placed = placedWidgets(frozen);
+  if (placed.length === 0) return false;
+  const rows = await db
+    .select({ id: widgets.id, blockId: widgets.blockId, hash: widgets.publishedHash })
+    .from(widgets)
+    .where(and(inArray(widgets.id, placed.map((w) => w.widgetId)), eq(widgets.documentId, documentId)));
+  return placed.some((w) => rows.find((r) => r.id === w.widgetId && r.blockId === w.blockId)?.hash !== w.hash);
+}
+
 /**
  * Restoring a checkpoint republishes each of its widgets from the bundle
  * (C12): the kept source and rows are rendered again and become the live

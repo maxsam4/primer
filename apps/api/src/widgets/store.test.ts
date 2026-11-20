@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import type { WidgetDTO } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
-import { documents, suggestions, users, versions, widgets } from '../db/schema.ts';
+import { documents, suggestions, threadPlacements, users, versions, widgets } from '../db/schema.ts';
 import { v7 as uuidv7 } from 'uuid';
 import { createLiveThread } from '../lib/liveThreads.ts';
 import { NoopNotifier } from '../notifications/notifier.ts';
@@ -16,7 +16,7 @@ import { flushDataChanged } from '../records/changed.ts';
 import { readBundleFile } from '../live/bundle.ts';
 import { createCheckpoint, restoreCheckpoint } from '../live/checkpoint.ts';
 import { FilesystemStorage } from '../storage/filesystem.ts';
-import { createLiveDoc, paragraph, seedBlocks, withLiveDoc } from '../live/live.testlib.ts';
+import { createLiveDoc, makeAgent, paragraph, seedBlocks, withLiveDoc } from '../live/live.testlib.ts';
 import { applyPlan } from '../live/pipeline.ts';
 import { readBlocks } from '../live/editor.ts';
 import { reachableFragments } from '../live/reach.ts';
@@ -153,6 +153,63 @@ describe('widgets in checkpoints', () => {
       await restoreCheckpoint(storage, { documentId, bundleKey: version!.bundleKey! }, owner);
       const dto = await getWidget(owner, draft.widgetId);
       expect(dto.ok && labelMap(dto.value)).toEqual({ review: 'Peer review', merge: 'Merge' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('an agent that may only suggest cannot restore a published widget, directly or by suggestion', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'primer-widget-bundle-'));
+    const storage = new FilesystemStorage(root);
+    try {
+      const documentId = await createLiveDoc();
+      await seedBlocks(documentId, [paragraph('intro', 'Intro')]);
+      const { draft } = await draftAndPublish(documentId, flow('Before'));
+      const checkpoint = await createCheckpoint(storage, documentId, owner, null);
+      const [version] = await db.select().from(versions).where(eq(versions.id, checkpoint.versionId));
+      const after = await draftAndPublish(documentId, flow('After'), draft.widgetId);
+
+      await db.update(documents).set({ agentMode: 'suggest' }).where(eq(documents.id, documentId));
+      const restored = await restoreCheckpoint(storage, { documentId, bundleKey: version!.bundleKey! }, await makeAgent(owner.id));
+      expect(restored.outcomes.map((o) => o.status === 'conflict' && o.refusal?.code)).toEqual(restored.outcomes.map(() => 'forbidden'));
+      expect(await db.select().from(suggestions).where(eq(suggestions.documentId, documentId))).toEqual([]);
+      const [row] = await db.select().from(widgets).where(eq(widgets.id, draft.widgetId));
+      expect(row!.publishedSource).toContain('After');
+      expect(row!.publishedHash).toBe(after.published.publishedHash);
+      expect(row!.publishedSvgLight).toContain('>After</text>');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a checkpoint keeps the placement of threads on unchanged widget labels and parts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'primer-widget-bundle-'));
+    const storage = new FilesystemStorage(root);
+    try {
+      const documentId = await createLiveDoc();
+      await seedBlocks(documentId, [paragraph('intro', 'Intro')]);
+      const { draft } = await draftAndPublish(documentId, flow('Review'));
+      const start = async (anchor: Record<string, unknown>) => {
+        const out = await createLiveThread(new NoopNotifier(), owner, documentId, { anchor, body: 'Note' });
+        if (!out.ok) throw new Error(out.refusal.message);
+        return out.value.id;
+      };
+      const target = { tabId: 'main', blockId: draft.blockId };
+      const onLabel = await start({ type: 'prose', target: { ...target, textId: 'review' }, quote: 'Review' });
+      const onPart = await start({ type: 'widget-part', target, anchor: 'step-merge' });
+
+      const checkpoint = await createCheckpoint(storage, documentId, owner, null);
+      const placed = await db.select().from(threadPlacements).where(eq(threadPlacements.versionId, checkpoint.versionId));
+      const anchorOf = (id: string) => placed.find((p) => p.threadId === id)?.anchor;
+      expect(anchorOf(onLabel)).toMatchObject({ type: 'prose', target: { textId: 'review' } });
+      expect(anchorOf(onPart)).toMatchObject({ type: 'widget-part', anchor: 'step-merge' });
+
+      // The redraw no longer draws the merge step: its thread is unplaced on the next checkpoint.
+      await draftAndPublish(documentId, flow('Review').replace(' data-anchor="step-merge"', ''), draft.widgetId);
+      const next = await createCheckpoint(storage, documentId, owner, null);
+      const later = await db.select().from(threadPlacements).where(eq(threadPlacements.versionId, next.versionId));
+      expect(later.find((p) => p.threadId === onPart)?.anchor).toBeNull();
+      expect(later.find((p) => p.threadId === onLabel)?.anchor).toMatchObject({ type: 'prose' });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -177,11 +177,11 @@ For an HTML page document, `pages` lists each page block: `source` (the page as 
 Edit a live document by block. Read it first with `primer_get_doc`; `authoring.md` describes the workflow.
 
 - **Input:** `{ documentId, baseVersion, ops, runId?, onConflict?: "refuse" | "suggest", allowCommentedDelete? }`. Ops:
-  - `{ op: "add", at: Target, position: "before" | "after", blocks: BlockInput[] }`
+  - `{ op: "add", at: Target, position: "before" | "after" | "firstChild", blocks: BlockInput[] }` (`firstChild`: as `at`'s first child)
   - `{ op: "update", target, block: BlockInput, expectVersion }`. On a page's text, `target` is `{ tabId, blockId, pid }` and `block` is the new plain text.
   - `{ op: "replaceRange", from, to, blocks, expectVersions: { [blockId]: version } }` (every block from `from` to `to`, siblings)
   - `{ op: "delete", target, expectVersion }`
-  - `{ op: "move", target, at, position, expectVersion }`
+  - `{ op: "move", target, at, position, expectVersion }` (same positions)
 - **BlockInput:** Markdown (several paragraphs or list items make several blocks), `{ html: "<one element>" }`, or `{ json: <BlockNote partial block> }`.
 - **Output:** `{ docVersion, outcomes: [{ index, target, status, blocks?, refusal?, note? }] }`. `status` is `applied`, `unchanged`, `conflict` or `suggested` (with `suggestionId`). `blocks` are the stored blocks with their new versions; `note` says when what was stored differs from what you wrote.
 - **Suggestions:** on a document you don't own (unless its owner set agent mode to `edit`), or in a run asked by someone who can't edit, every op is stored as a suggestion (`suggested`) for a person to accept or reject; nothing is written. With `onConflict: "suggest"`, an op whose block changed is suggested against the current text instead of coming back `target_changed`.

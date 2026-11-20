@@ -16,7 +16,6 @@ import { contentUnchangedSince, createCheckpoint, restoreCheckpoint } from '../l
 import { exportHtml, exportMarkdown, exportText } from '../live/export.ts';
 import { exportDecisions } from '../live/choices.ts';
 import { withLiveDocument } from '../live/instance.ts';
-import { ensureSigningKey } from '../live/signing.ts';
 import { MAX_BYTES } from '../upload/validate.ts';
 import { db } from '../db/client.ts';
 import { actorName } from '../lib/actors.ts';
@@ -24,7 +23,7 @@ import { artifactCsp } from '../lib/pagePolicy.ts';
 import { logger } from '../logger.ts';
 import { validateUpload } from '../upload/validate.ts';
 import {
-  canRead, canEdit, canManage, loadEffectiveRole,
+  canRead, canComment, canEdit, canManage, loadEffectiveRole,
   type Visibility,
 } from '../lib/permissions.ts';
 import { tokenScopes } from '../auth/scopes.ts';
@@ -126,6 +125,7 @@ export function registerDocumentRoutes(
       },
       myRole: eff,
       lastView: null,
+      canComment: canComment(doc.visibility as Visibility, eff),
     };
     // Records this visit, returning the previous one for catch-up (read in
     // the same statement, so a second open can't lose it in between).
@@ -505,7 +505,6 @@ export function registerDocumentRoutes(
       }
       note = typeof body.note === 'string' && body.note.trim().length > 0 ? body.note.trim().slice(0, 500) : null;
     }
-    await ensureSigningKey(deps.storage);
     // A save is always a checkpoint (it also freezes records and comments);
     // the answer says when no one edited the content since the previous one.
     const unchangedSince = await contentUnchangedSince(docId);
@@ -567,7 +566,6 @@ export function registerDocumentRoutes(
       }
       body = await readBundleFile(deps.storage, version.bundleKey, file);
     } else {
-      await ensureSigningKey(deps.storage);
       const decisions = await exportDecisions(docId);
       body = await withLiveDocument(docId, async (doc) =>
         access.format === 'html'
@@ -622,7 +620,6 @@ export function registerDocumentRoutes(
       if (!version?.bundleKey) return c.json({ error: 'not_found' }, 404);
       html = new TextDecoder().decode(await readBundleFile(deps.storage, version.bundleKey, 'static.html'));
     } else {
-      await ensureSigningKey(deps.storage);
       const decisions = await exportDecisions(docId);
       html = (
         await withLiveDocument(docId, async (doc) =>

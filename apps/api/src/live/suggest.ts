@@ -25,7 +25,7 @@ import { originFor, SYSTEM_ORIGIN } from './origin.ts';
 import { applyPlan, contentVersion, type PlannedEdit } from './pipeline.ts';
 import type { SuggestedEdit } from './proposals.ts';
 import { docQueue } from './queue.ts';
-import { tabFragmentName } from './reach.ts';
+import { fragmentName } from './reach.ts';
 import { insertAt } from './undo.ts';
 
 export type { SuggestedEdit, Proposal } from './proposals.ts';
@@ -78,15 +78,17 @@ export async function listSuggestions(actor: AuthUser, documentId: string): Prom
   if (rows.length === 0) return { ok: true, value: [] };
   const pmDocs = await withDoc(documentId, (ydoc) => {
     const out = new Map<string, PmNode>();
+    // A suggestion's edits share one fragment (a tab, or a page text or label).
     for (const row of rows) {
-      if (!out.has(row.tabId)) out.set(row.tabId, fragmentDoc(ydoc.getXmlFragment(tabFragmentName(row.tabId))));
+      const name = fragmentName({ ...row.edits[0]!.target, tabId: row.tabId });
+      if (!out.has(name)) out.set(name, fragmentDoc(ydoc.getXmlFragment(name)));
     }
     return out;
   });
   const forAgent = actor.kind === 'agent';
   const value: SuggestionDTO[] = [];
   for (const row of rows) {
-    const pm = pmDocs.get(row.tabId)!;
+    const pm = pmDocs.get(fragmentName({ ...row.edits[0]!.target, tabId: row.tabId }))!;
     const edits: SuggestedEditDTO[] = [];
     for (const edit of row.edits) {
       const now = findBlock(pm, edit.target.blockId)?.node ?? null;
@@ -268,7 +270,7 @@ function acceptEdit(row: Row): PlannedEdit {
   const schema = serverEditor().editor.pmSchema;
   const first = row.edits[0]!;
   return {
-    target: { tabId: row.tabId, blockId: first.target.blockId },
+    target: { ...first.target, tabId: row.tabId },
     inverse: false,
     build: (tr) => {
       const stale: { blockId: string; reason: string }[] = [];

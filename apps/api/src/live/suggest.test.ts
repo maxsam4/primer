@@ -10,6 +10,7 @@ import { asUserJson } from '../test/harness.ts';
 import { liveDocName, liveInstance } from './instance.ts';
 import { createLiveDoc, makeAgent, markdownOf, ops, paragraph, seedBlocks, until, versions } from './live.testlib.ts';
 import { decideSuggestion, listSuggestions } from './suggest.ts';
+import { getLiveDoc } from './read.ts';
 import { claimRun, finishRun, requestRun } from './runs.ts';
 import { undoRun } from './undo.ts';
 import { createCheckpoint, restoreCheckpoint } from './checkpoint.ts';
@@ -304,5 +305,65 @@ describe('suggestions', () => {
     expect(await decideSuggestion(sid, stranger, 'accept')).toMatchObject({ ok: false, status: 409 });
     expect(await markdownOf(b, owner)).toEqual(['Alpha', 'Beta', 'Gamma']);
     expect(await markdownOf(a, owner)).toEqual(['Public']);
+  });
+});
+
+describe('suggested structure changes', () => {
+  const block = (id: string, text: string, ...children: ReturnType<typeof paragraph>[]) => ({ ...paragraph(id, text), children });
+
+  /** The tab as indented lines: nesting and order, not just text. */
+  async function outline(id: string): Promise<string[]> {
+    const out = await getLiveDoc(id, owner, { format: 'markdown' });
+    if (!out.ok) throw new Error(out.refusal.message);
+    return out.value.blocks.map((b) => `${'  '.repeat(b.depth)}${b.markdown}`);
+  }
+
+  /** Sends the ops as the owner suggesting, then accepts every suggestion in order. */
+  async function suggestAndAccept(id: string, list: Record<string, unknown>[]) {
+    const result = await ops(id, owner, { mode: 'suggest', ops: list });
+    expect(result.outcomes.map((o) => o.status)).toEqual(list.map(() => 'suggested'));
+    for (const s of await open(id)) expect(await decideSuggestion(s.id, owner, 'accept')).toMatchObject({ ok: true });
+  }
+
+  it('a reorder', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha'), paragraph('b', 'Beta')]);
+    const v = await versions(id, owner);
+    await suggestAndAccept(id, [{ op: 'move', target: main('a'), at: main('b'), position: 'after', expectVersion: v.a }]);
+    expect(await outline(id)).toEqual(['Beta', 'Alpha']);
+  });
+
+  it('blocks dragged to the top, accepted in order', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha'), paragraph('b', 'Beta'), paragraph('c', 'Gamma'), paragraph('d', 'Delta')]);
+    const v = await versions(id, owner);
+    await suggestAndAccept(id, [
+      { op: 'move', target: main('d'), at: main('a'), position: 'before', expectVersion: v.d },
+      { op: 'move', target: main('c'), at: main('d'), position: 'after', expectVersion: v.c },
+    ]);
+    expect(await outline(id)).toEqual(['Delta', 'Gamma', 'Alpha', 'Beta']);
+  });
+
+  it('an indent', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha'), paragraph('b', 'Beta'), paragraph('c', 'Gamma')]);
+    const v = await versions(id, owner);
+    await suggestAndAccept(id, [{ op: 'move', target: main('b'), at: main('a'), position: 'firstChild', expectVersion: v.b }]);
+    expect(await outline(id)).toEqual(['Alpha', '  Beta', 'Gamma']);
+  });
+
+  it('an outdent', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [block('a', 'Alpha', paragraph('b', 'Beta')), paragraph('c', 'Gamma')]);
+    const v = await versions(id, owner);
+    await suggestAndAccept(id, [{ op: 'move', target: main('b'), at: main('a'), position: 'after', expectVersion: v.b }]);
+    expect(await outline(id)).toEqual(['Alpha', 'Beta', 'Gamma']);
+  });
+
+  it('a new child', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha'), paragraph('b', 'Beta')]);
+    await suggestAndAccept(id, [{ op: 'add', at: main('a'), position: 'firstChild', blocks: [{ json: { type: 'paragraph', props: {}, content: [{ type: 'text', text: 'New', styles: {} }], children: [] } }] }]);
+    expect(await outline(id)).toEqual(['Alpha', '  New', 'Beta']);
   });
 });

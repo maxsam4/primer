@@ -15,7 +15,6 @@ import { SYSTEM_ORIGIN } from './origin.ts';
 import { applyPlan, type PlannedEdit } from './pipeline.ts';
 import { isOwnSourceKey, sourceKeyOf } from '../page/publish.ts';
 import { isTabFragment, pageBlocks, reachableFragments, tabsOf, targetOfFragment } from './reach.ts';
-import { ensureSigningKey } from './signing.ts';
 import { rewriteSources, trustedMeta, trustedSources } from './sources.ts';
 import { rebuildTaskIndex } from './tasks.ts';
 import { widgetBlocks } from '../widgets/bundle.ts';
@@ -73,7 +72,6 @@ export async function copyDocument(
     .from(documents)
     .where(eq(documents.id, sourceId));
 
-  await ensureSigningKey(storage);
   const captured = await captureState(sourceId, actor);
   const documentId = uuidv7();
 

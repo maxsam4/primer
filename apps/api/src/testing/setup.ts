@@ -1,5 +1,17 @@
 import { sql } from '../db/client.ts';
-import { afterAll, beforeEach } from 'vitest';
+import { afterAll, beforeAll, beforeEach } from 'vitest';
+import { loadSigningKey } from '../live/signing.ts';
+
+// The server loads the import signing key at start (src/index.ts); tests get a fresh one.
+beforeAll(async () => {
+  await loadSigningKey({
+    get: async () => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    put: async () => undefined,
+    delete: async () => undefined,
+  });
+});
 
 beforeEach(async () => {
   // Wipe transactional tables between tests; keep the seeded mock user row.

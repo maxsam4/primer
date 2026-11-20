@@ -9,13 +9,15 @@ import { editorDictionary, t } from '../i18n/index.ts';
 /** A block as BlockNote's `editor.document` lists it. */
 export type DraftBlock = { id: string; type: string; props?: unknown; content?: unknown; children?: DraftBlock[] };
 
-type Flat = { block: DraftBlock; parentId: string | null; key: string };
+type Flat = { block: DraftBlock; parentId: string | null; index: number; key: string };
+
+const keyOf = (block: DraftBlock) => JSON.stringify([block.type, block.props, block.content]);
 
 function flatten(blocks: DraftBlock[], parentId: string | null = null, out: Flat[] = []): Flat[] {
-  for (const block of blocks) {
-    out.push({ block, parentId, key: JSON.stringify([block.type, block.props, block.content]) });
+  blocks.forEach((block, index) => {
+    out.push({ block, parentId, index, key: keyOf(block) });
     flatten(block.children ?? [], block.id, out);
-  }
+  });
   return out;
 }
 
@@ -24,47 +26,84 @@ function fresh(block: DraftBlock): Record<string, unknown> {
   return { type: block.type, props: block.props, content: block.content, children: (block.children ?? []).map(fresh) };
 }
 
+/** The siblings that were siblings already and keep their order (the longest
+ *  such run); every other existing sibling moved here. */
+function staying(siblings: DraftBlock[], parentId: string | null, before: Map<string, Flat>): Set<string> {
+  const items = siblings.flatMap((s) => {
+    const old = before.get(s.id);
+    return old && old.parentId === parentId ? [{ id: s.id, index: old.index }] : [];
+  });
+  const length = items.map(() => 1);
+  const from = items.map(() => -1);
+  items.forEach((item, i) => {
+    for (let j = 0; j < i; j++) {
+      if (items[j]!.index < item.index && length[j]! + 1 > length[i]!) {
+        length[i] = length[j]! + 1;
+        from[i] = j;
+      }
+    }
+  });
+  const out = new Set<string>();
+  for (let i = length.indexOf(Math.max(...length)); i >= 0; i = from[i]!) out.add(items[i]!.id);
+  return out;
+}
+
 /**
- * The ops that turn `base` (the tab when suggesting began) into `draft`:
- * a changed block is an update, a removed one a delete, and new blocks are
- * added after the block before them. `versions` are the blocks' versions at
- * the start, so a block someone changed since is a conflict to decide.
+ * The ops that turn `base` (the tab when suggesting began) into `draft`. Each
+ * op is suggested against `base` on its own, so every op is placed relative to
+ * blocks that exist there: a changed block is an update, a block under a new
+ * parent or out of order among its siblings a move, a removed one a delete,
+ * and new blocks (with their children) are added after their previous sibling,
+ * else as their parent's first child, else before the next sibling that stays.
+ * `versions` are the blocks' versions at the start, so a block someone changed
+ * since is a conflict to decide.
  */
 export function draftOps(base: DraftBlock[], draft: DraftBlock[], versions: Map<string, string>, tabId: string): LiveOp[] {
   const before = new Map(flatten(base).map((f) => [f.block.id, f]));
-  const after = flatten(draft);
-  const kept = new Set(after.map((f) => f.block.id));
+  const kept = new Set<string>();
   const ops: LiveOp[] = [];
   const adds = new Map<string, Extract<LiveOp, { op: 'add' }>>();
-  let previous: string | null = null;
-  for (const f of after) {
-    const old = before.get(f.block.id);
-    const version = versions.get(f.block.id);
-    if (old) {
-      if (old.key !== f.key && version) {
-        const { type, props, content } = f.block;
-        ops.push({ op: 'update', target: { tabId, blockId: f.block.id }, block: { json: { type, props, content } as Record<string, unknown> }, expectVersion: version });
+  const at = (blockId: string) => ({ tabId, blockId });
+
+  const walk = (siblings: DraftBlock[], parentId: string | null) => {
+    const stays = staying(siblings, parentId, before);
+    let previous: string | null = null;
+    siblings.forEach((block, i) => {
+      const later = siblings.slice(i + 1);
+      const next = (later.find((s) => stays.has(s.id)) ?? later.find((s) => before.has(s.id)))?.id;
+      const place = (): [string, 'after' | 'firstChild' | 'before'] | null =>
+        previous ? [previous, 'after'] : parentId ? [parentId, 'firstChild'] : next ? [next, 'before'] : null;
+      const old = before.get(block.id);
+      if (!old) {
+        const [anchor, position] = place() ?? [base[0]?.id, 'before' as const];
+        if (!anchor) return;
+        let add = adds.get(`${position}:${anchor}`);
+        if (!add) {
+          add = { op: 'add', at: at(anchor), position, blocks: [] };
+          adds.set(`${position}:${anchor}`, add);
+          ops.push(add);
+        }
+        add.blocks.push({ json: fresh(block) });
+        return;
       }
-      previous = f.block.id;
-      continue;
-    }
-    // A new block's children go with it.
-    if (f.parentId !== null && !before.has(f.parentId)) continue;
-    const anchor = previous ?? base[0]?.id;
-    if (!anchor) continue;
-    const key = previous ? `after:${anchor}` : `before:${anchor}`;
-    let add = adds.get(key);
-    if (!add) {
-      add = { op: 'add', at: { tabId, blockId: anchor }, position: previous ? 'after' : 'before', blocks: [] };
-      adds.set(key, add);
-      ops.push(add);
-    }
-    add.blocks.push({ json: fresh(f.block) });
-  }
+      kept.add(block.id);
+      const version = versions.get(block.id);
+      const to = stays.has(block.id) ? null : place();
+      if (to && version) ops.push({ op: 'move', target: at(block.id), at: at(to[0]), position: to[1], expectVersion: version });
+      if (old.key !== keyOf(block) && version) {
+        const { type, props, content } = block;
+        ops.push({ op: 'update', target: at(block.id), block: { json: { type, props, content } as Record<string, unknown> }, expectVersion: version });
+      }
+      previous = block.id;
+      walk(block.children ?? [], block.id);
+    });
+  };
+  walk(draft, null);
+
   for (const [id, f] of before) {
     const version = versions.get(id);
     if (kept.has(id) || !version || (f.parentId !== null && !kept.has(f.parentId))) continue;
-    ops.push({ op: 'delete', target: { tabId, blockId: id }, expectVersion: version });
+    ops.push({ op: 'delete', target: at(id), expectVersion: version });
   }
   return ops;
 }

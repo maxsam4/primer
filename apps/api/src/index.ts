@@ -12,9 +12,11 @@ import { makeProxyResolver } from './auth/proxy.ts';
 import { makeBearerResolver, composeResolvers } from './auth/bearer.ts';
 import { makeOAuthBearerResolver } from './auth/oauth/bearer.ts';
 import { createHub } from './live/hub.ts';
+import { loadSigningKey } from './live/signing.ts';
 
 const port = Number(process.env.PORT ?? 3000);
 const { storage, description: storageDescription } = storageFromEnv();
+await loadSigningKey(storage);
 const notifier = notifierFromEnv();
 
 const rawAuthMode = process.env.AUTH_MODE;

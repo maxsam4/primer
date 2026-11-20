@@ -24,6 +24,20 @@ export async function widgetAnchorProblem(documentId: string, anchor: WidgetPart
     .select({ svg: widgets.publishedSvgLight, rows: widgets.rows })
     .from(widgets)
     .where(and(eq(widgets.id, widgetId), eq(widgets.documentId, documentId), eq(widgets.blockId, blockId)));
+  return partProblem(row, anchor);
+}
+
+/** Whether the widget published on the anchor's block still draws its part
+ *  or has its data point (where a checkpoint places the thread). */
+export async function widgetAnchorPublished(documentId: string, anchor: WidgetPartAnchor | DataPointAnchor): Promise<boolean> {
+  const [row] = await db
+    .select({ svg: widgets.publishedSvgLight, rows: widgets.rows })
+    .from(widgets)
+    .where(and(eq(widgets.documentId, documentId), eq(widgets.blockId, anchor.target.blockId)));
+  return partProblem(row, anchor) === null;
+}
+
+function partProblem(row: { svg: string | null; rows: unknown } | undefined, anchor: WidgetPartAnchor | DataPointAnchor): string | null {
   if (!row?.svg) return 'The widget has not been published.';
   if (anchor.type === 'widget-part') {
     return row.svg.includes(` data-anchor="${escapeAttr(anchor.anchor)}"`) ? null : `The widget draws no part named "${anchor.anchor}".`;

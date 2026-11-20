@@ -6,7 +6,9 @@ import { eq, sql } from 'drizzle-orm';
 import type { AuthUser } from '../app.ts';
 import { createApp } from '../app.ts';
 import { db } from '../db/client.ts';
-import { documents, suggestions, versions } from '../db/schema.ts';
+import { documents, suggestions, threadPlacements, versions } from '../db/schema.ts';
+import { createLiveThread } from '../lib/liveThreads.ts';
+import { createCheckpoint } from '../live/checkpoint.ts';
 import { publishDocument, type PublishInput } from '../lib/publish.ts';
 import { makeAgent, withLiveDoc } from '../live/live.testlib.ts';
 import { applyOps } from '../live/ops.ts';
@@ -159,6 +161,33 @@ describe('page documents', () => {
         // The mark is still in its (now unreachable) fragment, so the thread orphans, never vanishes.
         expect(fragmentFor(doc, { tabId: 'main', blockId: page.blockId, pid: 'p3' }).toString()).toContain('t-pricing');
       });
+    });
+  });
+
+  it('a checkpoint keeps the placement of threads on unchanged page text and blocks', async () => {
+    await withStorage(async (storage) => {
+      const r = await publishPage(storage, PAGE.replace('<canvas', '<primer-code data-embed-id="snippet" lang="ts">const answer = 42;</primer-code>\n<canvas'));
+      const page = await pageOf(r.documentId);
+      const start = async (anchor: unknown) => {
+        const out = await createLiveThread(new NoopNotifier(), owner, r.documentId, { anchor, body: 'Note' });
+        if (!out.ok) throw new Error(out.refusal.message);
+        return out.value.id;
+      };
+      const onText = await start({ type: 'prose', target: { tabId: 'main', blockId: page.blockId, pid: 'p2' }, quote: 'editor' });
+      const onEmbed = await start({ type: 'prose', target: { tabId: 'main', blockId: page.blockId, embedId: 'snippet' }, quote: 'answer' });
+      const onBlock = await start({ type: 'block', target: { tabId: 'main', blockId: page.blockId } });
+      const onGone = await start({ type: 'block', target: { tabId: 'main', blockId: 'gone' } });
+
+      const checkpoint = await createCheckpoint(storage, r.documentId, owner, null);
+      const placed = await db
+        .select({ threadId: threadPlacements.threadId, anchor: threadPlacements.anchor })
+        .from(threadPlacements)
+        .where(eq(threadPlacements.versionId, checkpoint.versionId));
+      const anchorOf = (id: string) => placed.find((p) => p.threadId === id)?.anchor;
+      expect(anchorOf(onText)).toMatchObject({ type: 'prose', target: { pid: 'p2' } });
+      expect(anchorOf(onEmbed)).toMatchObject({ type: 'prose', target: { embedId: 'snippet' } });
+      expect(anchorOf(onBlock)).toMatchObject({ type: 'block' });
+      expect(anchorOf(onGone)).toBeNull();
     });
   });
 

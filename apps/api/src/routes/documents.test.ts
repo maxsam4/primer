@@ -748,6 +748,17 @@ describe('doc access under visibility + collaborators', () => {
     });
   });
 
+  it('GET org doc as a reader without a collaborator row reports stranger role and canComment', async () => {
+    await withMultiUserApp(async (app) => {
+      const upload = await uploadFixture(app);
+      const res = await app.request(`/api/documents/${upload.documentId}`, { headers: asUser('mock-user-2') });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { myRole: string; canComment: boolean };
+      expect(body.myRole).toBe('stranger');
+      expect(body.canComment).toBe(true);
+    });
+  });
+
   it('GET private doc as responder returns 200 with myRole responder', async () => {
     await withMultiUserApp(async (app) => {
       const upload = await uploadFixture(app);

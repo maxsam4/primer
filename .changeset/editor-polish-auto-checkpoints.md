@@ -13,7 +13,9 @@ with a link to it, or that no one edited it since vN, or that it failed.
 People can suggest instead of edit: the editor header has an Editing |
 Suggesting switch. While suggesting, edits are a draft sent as suggestions
 (apply ops with `mode: 'suggest'`), which the owner and editors accept or
-reject. Commenters can suggest too.
+reject. Commenters can suggest too. Reordering, indenting and outdenting
+blocks in the draft are suggested as moves, and a new block keeps its nesting;
+`add` and `move` take `position: 'firstChild'` to place under a block.
 
 The editor's toolbars, menus, comment popovers and side panels follow Primer's
 light and dark tokens: the BlockNote Ariakit theme's own bevelled buttons,

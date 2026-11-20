@@ -6,7 +6,6 @@ import type { Storage } from '../storage/types.ts';
 import { contentUnchangedSince, createCheckpoint } from './checkpoint.ts';
 import { onLiveUpdate } from './instance.ts';
 import type { LiveOrigin } from './origin.ts';
-import { ensureSigningKey } from './signing.ts';
 
 /** A checkpoint is saved this long after the last edit... */
 export const SETTLE_MS = 2 * 60_000;
@@ -68,7 +67,6 @@ async function autoCheckpoint(documentId: string, actorId: string): Promise<void
   `)) as unknown as AuthUser[];
   if (!row) return;
   if ((await contentUnchangedSince(documentId)) !== null) return;
-  await ensureSigningKey(current);
   await createCheckpoint(current, documentId, row, null, { automatic: true });
 }
 

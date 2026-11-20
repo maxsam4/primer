@@ -8,7 +8,7 @@ import { readableLiveDoc } from '../lib/liveThreads.ts';
 import { canEdit } from '../lib/permissions.ts';
 import { blockVersion, findBlock } from './blocks.ts';
 import { serverEditor } from './editor.ts';
-import { removeBlock } from './ops.ts';
+import { insertFirstChild, removeBlock } from './ops.ts';
 import { originFor } from './origin.ts';
 import { applyPlan, contentVersion, type BlockPlace, type PlannedEdit } from './pipeline.ts';
 import { loadRun, type RunResult } from './runs.ts';
@@ -113,10 +113,7 @@ export function insertAt(tr: Transform, node: PmNode, place: BlockPlace): Refusa
   }
   const parent = place.parentId ? findBlock(tr.doc, place.parentId) : null;
   if (parent) {
-    const group = parent.node.childCount > 1 ? parent.node.child(1) : null;
-    const end = parent.pos + parent.node.nodeSize - 1;
-    if (group) tr.insert(end - group.nodeSize + 1, node);
-    else tr.insert(end, tr.doc.type.schema.nodes.blockGroup!.create(null, node));
+    insertFirstChild(tr, parent, node);
     return;
   }
   tr.insert(1, node);

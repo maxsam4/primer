@@ -3,10 +3,10 @@ import type { Node as PmNode } from '@tiptap/pm/model';
 import { Transform } from '@tiptap/pm/transform';
 import { eq, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
-import type { BlockPlace, ProposeBranchResponse, Refusal } from '@polygonlabs/primer-api-types';
+import type { BlockPlace, ProposeBranchResponse, Refusal, Target } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
-import { documents } from '../db/schema.ts';
+import { documents, widgets as widgetsTable } from '../db/schema.ts';
 import { transactionWithEvents } from '../lib/events.ts';
 import { readableLiveDoc } from '../lib/liveThreads.ts';
 import { canEdit, canManage } from '../lib/permissions.ts';
@@ -20,8 +20,11 @@ import { removeBlock } from './ops.ts';
 import { originFor } from './origin.ts';
 import { applyPlan, contentVersion, indexBlocks, type PlannedEdit } from './pipeline.ts';
 import { docQueue } from './queue.ts';
-import { tabFragmentName, tabsOf } from './reach.ts';
+import { fragmentName, pageBlocks, tabFragmentName, tabsOf, targetOfFragment, widgetLabelFragments } from './reach.ts';
 import { insertAt } from './undo.ts';
+import { isOwnSourceKey } from '../page/publish.ts';
+import { widgetBlocks } from '../widgets/bundle.ts';
+import { renderBoth, widgetIdPrefix } from '../widgets/render.ts';
 
 export type ProposeResult = { ok: true; value: ProposeBranchResponse } | { ok: false; status: 400 | 403 | 404; refusal: Refusal };
 
@@ -81,23 +84,28 @@ export async function proposeBranch(storage: Storage, actor: AuthUser, branchId:
   const ids = await idsToParent(storage, branchId, parentId);
   const baseDoc = new Y.Doc();
   Y.applyUpdate(baseDoc, row.base);
+  const owned = await ownedToParent(storage, branchId, parentId, baseDoc, ids);
   const baseTabs = new Set(tabsOf(baseDoc).map((t) => t.id));
-  const tabs = await withLiveDocument(branchId, (doc) =>
-    tabsOf(doc).map((tab) => {
-      const tr = new Transform(fragmentDoc(doc.getXmlFragment(tabFragmentName(tab.id))));
-      rewriteIds(tr, 'branch', ids);
-      return { id: tab.id, branch: tr.doc };
+  const fragments = await withLiveDocument(branchId, (doc) =>
+    fragmentsOf(doc).map((target) => {
+      const tr = new Transform(fragmentDoc(doc.getXmlFragment(fragmentName(target))));
+      rewriteIds(tr, 'branch', ids, owned);
+      return { target, branch: tr.doc };
     }),
   );
   const edits: PlannedEdit[] = [];
-  for (const tab of tabs) {
-    if (!baseTabs.has(tab.id)) edits.push(newTabEdit(tab.id));
-    else edits.push(...tabEdits(tab.id, fragmentDoc(baseDoc.getXmlFragment(tabFragmentName(tab.id))), tab.branch));
+  for (const { target, branch } of fragments) {
+    const base = fragmentDoc(baseDoc.getXmlFragment(fragmentName(target)));
+    if (!target.blockId && !baseTabs.has(target.tabId)) edits.push(newTabEdit(target.tabId));
+    else if (target.embedId) {
+      if (!branch.eq(base)) edits.push(embedEdit(target));
+    } else edits.push(...tabEdits(target, base, branch, owned.refused));
   }
   baseDoc.destroy();
+  const plan = [...edits.filter((e) => !owned.refused.has(e.target.blockId)), ...owned.refused.values()];
 
   await docQueue(parentId)(() => withdrawOpenSet(parentId, branchId, actor));
-  const result = await applyPlan(parentId, originFor(actor), { edits, onConflict: 'suggest', mode: 'suggest', changeSetId: branchId });
+  const result = await applyPlan(parentId, originFor(actor), { edits: plan, onConflict: 'suggest', mode: 'suggest', changeSetId: branchId });
   return { ok: true, value: { ...result, documentId: parentId, changeSetId: branchId } };
 }
 
@@ -141,6 +149,82 @@ async function idsToParent(storage: Storage, branchId: string, parentId: string)
     ids.set(f.id, id);
   }
   return ids;
+}
+
+/** Every fragment the branch's content reaches: each tab's, then the page
+ *  text, embed and widget label fragments of its blocks, as targets. */
+function fragmentsOf(doc: Y.Doc): Target[] {
+  const out: Target[] = [];
+  for (const tab of tabsOf(doc)) {
+    out.push({ tabId: tab.id, blockId: '' });
+    for (const name of widgetLabelFragments(doc.getXmlFragment(tabFragmentName(tab.id)))) out.push(targetOfFragment(name, tab.id)!);
+  }
+  for (const page of pageBlocks(doc)) {
+    for (const pid of page.pids) out.push({ tabId: page.tabId, blockId: page.blockId, pid });
+    for (const embedId of page.embeds) out.push({ tabId: page.tabId, blockId: page.blockId, embedId });
+  }
+  return out;
+}
+
+type Owned = { pageSources: Map<string, string>; widgetHashes: Map<string, string>; refused: Map<string, PlannedEdit> };
+
+/**
+ * The branch's own page sources and widget rows → the parent's, by block id
+ * against the base (the copy made them for the same blocks): a page whose
+ * stamped source is still the copy of the base's maps to the base's key, a
+ * widget whose published row still renders, under the base's id, to the
+ * base's hash maps to the base's row and hash. A page or widget republished
+ * or added on the branch names something only the branch has: those blocks
+ * are refused rather than proposed.
+ */
+async function ownedToParent(storage: Storage, branchId: string, parentId: string, baseDoc: Y.Doc, ids: Map<string, string>): Promise<Owned> {
+  const owned: Owned = { pageSources: new Map(), widgetHashes: new Map(), refused: new Map() };
+  const { pages, widgets } = await withLiveDocument(branchId, (doc) => ({ pages: pageBlocks(doc), widgets: widgetBlocks(doc) }));
+  const basePages = new Map(pageBlocks(baseDoc).map((p) => [p.blockId, p]));
+  const read = async (key: string) => new Response(await storage.get(key)).text();
+  for (const page of pages) {
+    if (!isOwnSourceKey(branchId, page.sourceKey)) continue;
+    const base = basePages.get(page.blockId);
+    if (base && isOwnSourceKey(parentId, base.sourceKey) && (await read(page.sourceKey)) === (await read(base.sourceKey))) {
+      owned.pageSources.set(page.sourceKey, base.sourceKey);
+    } else owned.refused.set(page.blockId, branchOnlyEdit(page, 'The page'));
+  }
+  const baseWidgets = new Map(widgetBlocks(baseDoc).map((w) => [w.blockId, w]));
+  for (const widget of widgets) {
+    const base = baseWidgets.get(widget.blockId);
+    if (!base || (await widgetHash(branchId, widget.widgetId, base.widgetId)) !== base.hash) {
+      owned.refused.set(widget.blockId, branchOnlyEdit(widget, 'The widget'));
+      continue;
+    }
+    ids.set(widget.widgetId.toLowerCase(), base.widgetId);
+    owned.widgetHashes.set(base.widgetId, base.hash);
+  }
+  return owned;
+}
+
+/** The hash the branch's widget row would publish under the parent's id
+ * (the copy re-rendered it under the branch's own). */
+async function widgetHash(branchId: string, widgetId: string, parentWidgetId: string): Promise<string> {
+  const [row] = await db
+    .select({ source: widgetsTable.publishedSource, rows: widgetsTable.rows })
+    .from(widgetsTable)
+    .where(sql`${widgetsTable.id} = ${widgetId} AND ${widgetsTable.documentId} = ${branchId}`);
+  if (!row?.source) return '';
+  const rendered = await renderBoth(row.source, (row.rows ?? []) as never, widgetIdPrefix(parentWidgetId));
+  return 'errors' in rendered ? '' : rendered.hash;
+}
+
+function branchOnlyEdit(block: { tabId?: string; blockId: string }, what: string): PlannedEdit {
+  return {
+    target: { tabId: block.tabId ?? 'main', blockId: block.blockId },
+    inverse: false,
+    build: () => ({
+      code: 'target_missing',
+      message: `${what} in block ${block.blockId} was added or republished on the branch; it can't be proposed.`,
+      fix: 'Publish it on the parent instead.',
+      details: { blockId: block.blockId },
+    }),
+  };
 }
 
 /** Withdraws the open suggestions of an earlier proposal of this branch. */
@@ -223,7 +307,8 @@ function longestIncreasing(xs: number[]): number[] {
   return out;
 }
 
-function tabEdits(tabId: string, baseRoot: PmNode, branchRoot: PmNode): PlannedEdit[] {
+/** The edits of one fragment (`at`: its target, without a block id). */
+function tabEdits(at: Target, baseRoot: PmNode, branchRoot: PmNode, refused: Map<string, PlannedEdit>): PlannedEdit[] {
   const base = tree(baseRoot);
   const branch = tree(branchRoot);
   const movedOnBranch = movedBlocks(base, branch);
@@ -236,29 +321,43 @@ function tabEdits(tabId: string, baseRoot: PmNode, branchRoot: PmNode): PlannedE
     if (!b) {
       const parentNew = r.place.parentId !== null && !base.index.has(r.place.parentId);
       if (parentNew) continue;
+      // A new block holding a refused one isn't proposed: it would carry it in.
+      if (holdsAny(r.node, refused)) {
+        run = null;
+        continue;
+      }
       // Consecutive new siblings go in one edit: a suggestion builds against
       // the parent as it is, so separate ones would all anchor the same way.
       if (run && run.nodes.at(-1)!.attrs.id === r.place.prevId) run.nodes.push(r.node);
       else {
         run = { nodes: [r.node], place: r.place };
-        edits.push(insertRunEdit(tabId, run));
+        edits.push(insertRunEdit(at, run));
       }
       continue;
     }
     const changed = contentVersion(r.node) !== contentVersion(b.node);
     const moved = movedOnBranch.has(id);
-    if (changed || moved) edits.push(updateEdit(tabId, id, b.node, r.node, r.place, base, changed, moved));
+    if (changed || moved) edits.push(updateEdit({ ...at, blockId: id }, b.node, r.node, r.place, base, changed, moved));
   }
   for (const id of base.order) {
     const b = base.index.get(id)!;
     if (branch.index.has(id)) continue;
     if (b.place.parentId !== null && !branch.index.has(b.place.parentId)) continue;
-    edits.push(removeEdit(tabId, id, b.node));
+    edits.push(removeEdit({ ...at, blockId: id }, b.node));
   }
   return edits;
 }
 
-function bothChanged(target: { tabId: string; blockId: string }, why: string): Refusal {
+function holdsAny(node: PmNode, ids: Map<string, PlannedEdit>): boolean {
+  let found = ids.has(node.attrs.id as string);
+  node.descendants((child) => {
+    if (child.type.name === 'blockContainer' && ids.has(child.attrs.id as string)) found = true;
+    return !found;
+  });
+  return found;
+}
+
+function bothChanged(target: Target, why: string): Refusal {
   return {
     code: 'target_changed',
     message: `Block ${target.blockId} ${why} in the parent since the branch was made; the branch's version is a conflict to decide.`,
@@ -268,8 +367,7 @@ function bothChanged(target: { tabId: string; blockId: string }, why: string): R
 }
 
 function updateEdit(
-  tabId: string,
-  id: string,
+  target: Target,
   baseNode: PmNode,
   branchNode: PmNode,
   place: BlockPlace,
@@ -277,7 +375,7 @@ function updateEdit(
   changed: boolean,
   moved: boolean,
 ): PlannedEdit {
-  const target = { tabId, blockId: id };
+  const id = target.blockId;
   return {
     target,
     inverse: false,
@@ -304,9 +402,9 @@ function updateEdit(
   };
 }
 
-function insertRunEdit(tabId: string, run: { nodes: PmNode[]; place: BlockPlace }): PlannedEdit {
+function insertRunEdit(at: Target, run: { nodes: PmNode[]; place: BlockPlace }): PlannedEdit {
   return {
-    target: { tabId, blockId: run.nodes[0]!.attrs.id as string },
+    target: { ...at, blockId: run.nodes[0]!.attrs.id as string },
     inverse: false,
     build: (tr) => {
       // Already there (proposed and accepted before): nothing to add.
@@ -321,8 +419,7 @@ function insertRunEdit(tabId: string, run: { nodes: PmNode[]; place: BlockPlace 
   };
 }
 
-function removeEdit(tabId: string, id: string, baseNode: PmNode): PlannedEdit {
-  const target = { tabId, blockId: id };
+function removeEdit(target: Target, baseNode: PmNode): PlannedEdit {
   return {
     target,
     inverse: false,
@@ -331,6 +428,21 @@ function removeEdit(tabId: string, id: string, baseNode: PmNode): PlannedEdit {
       if (!ctx.suggesting && blockVersion(at.node) !== blockVersion(baseNode)) return bothChanged(target, 'was edited');
       return removeBlock(tr, at);
     },
+  };
+}
+
+/** An embed edited on the branch: its blocks can't be addressed by a
+ *  suggestion yet, so the change is refused rather than dropped. */
+function embedEdit(target: Target): PlannedEdit {
+  return {
+    target,
+    inverse: false,
+    build: () => ({
+      code: 'target_missing',
+      message: `Embed ${target.embedId} of block ${target.blockId} was edited on the branch; embeds can't be proposed yet.`,
+      fix: 'Make the same edit to the embed on the parent.',
+      details: { blockId: target.blockId, embedId: target.embedId },
+    }),
   };
 }
 

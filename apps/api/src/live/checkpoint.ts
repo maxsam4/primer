@@ -1,7 +1,7 @@
 import * as Y from 'yjs';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
-import type { CheckpointResponse, Reconciliation } from '@polygonlabs/primer-api-types';
+import { isLiveAnchor, type CheckpointResponse, type DataPointAnchor, type Reconciliation, type WidgetPartAnchor } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { documents, threadPlacements, threads, versions } from '../db/schema.ts';
@@ -14,9 +14,11 @@ import { originFor } from './origin.ts';
 import { persistedUpTo } from './persist.ts';
 import { applyPlan, type PlannedEdit } from './pipeline.ts';
 import { docQueue } from './queue.ts';
-import { isTabFragment, reachableFragments, tabFragmentName, tabsOf, targetOfFragment, type Tab } from './reach.ts';
-import { redrawBoundWidgets, restoreWidgets } from '../widgets/bundle.ts';
-import { pmDocOf } from './sources.ts';
+import { fragmentName, isTabFragment, reachableFragments, tabFragmentName, tabsOf, targetOfFragment, type Tab } from './reach.ts';
+import { redrawBoundWidgets, restoreWidgets, widgetsChangedSince } from '../widgets/bundle.ts';
+import { widgetAnchorPublished } from '../widgets/anchors.ts';
+import { pmDocOf, rewriteSources, trustedMeta, trustedSources } from './sources.ts';
+import { splitFrontMatter } from '../upload/markdown.ts';
 
 /** A live document's state frozen at one docVersion. */
 export type CapturedState = { state: Uint8Array; docVersion: number };
@@ -94,7 +96,7 @@ export async function writeCheckpoint(
   const [doc] = await db.select({ title: documents.title }).from(documents).where(eq(documents.id, documentId));
   const versionId = original?.versionId ?? uuidv7();
   const bundle = await renderBundle(storage, { versionId, documentId, title: doc?.title ?? '', state: captured.state });
-  const marked = markedThreads(captured.state);
+  const anchored = anchoredIn(captured.state);
   try {
     const versionNumber = await transactionWithEvents(async (tx, emit) => {
       await tx.execute(sql`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`);
@@ -114,14 +116,17 @@ export async function writeCheckpoint(
         automatic: opts.automatic ?? false,
         ...(original ? { originalKey: original.originalKey, sourceFormat: original.sourceFormat } : {}),
       });
-      // Open threads stay listed on the checkpoint: anchored where their
-      // comment mark is in the captured content, orphaned elsewhere.
+      // Open threads stay listed on the checkpoint: anchored where the
+      // captured content has their anchor, orphaned elsewhere.
       const open = await tx
         .select({ id: threads.id, anchor: threads.anchor })
         .from(threads)
         .where(and(eq(threads.documentId, documentId), isNull(threads.resolvedAt)));
       for (const thread of open) {
-        await tx.insert(threadPlacements).values({ threadId: thread.id, versionId, anchor: marked.has(thread.id) ? thread.anchor : null });
+        const anchor = thread.anchor as WidgetPartAnchor | DataPointAnchor;
+        const drawn = anchor.type !== 'widget-part' && anchor.type !== 'data-point' ? true : await widgetAnchorPublished(documentId, anchor);
+        const placed = anchored(thread) && drawn;
+        await tx.insert(threadPlacements).values({ threadId: thread.id, versionId, anchor: placed ? thread.anchor : null });
       }
       emit({
         documentId,
@@ -160,12 +165,18 @@ export async function restoreCheckpoint(
 ): Promise<Reconciliation> {
   const frozen = await loadBundleDoc(storage, checkpoint.bundleKey);
   try {
-    // The tab list is no block edit, so it can't be suggested: an agent that
-    // only suggests (the pipeline turns its edits below into suggestions)
-    // leaves it as it is.
-    if ((await effectiveAgentMode(checkpoint.documentId, actor.id)) === 'edit') {
-      await restoreTabs(checkpoint.documentId, tabsOf(frozen), actor);
-    }
+    // One decision for the whole restore. The tab list and import provenance
+    // are no block edits, so they can't be suggested: an agent that only
+    // suggests gets the content as suggestions and leaves them as they are.
+    // Nor can a published widget, and accepting its block alone would point
+    // the block at a publish that isn't there, so such a restore is refused.
+    const suggesting = (await effectiveAgentMode(checkpoint.documentId, actor.id)) === 'suggest';
+    if (!suggesting) await restoreTabs(checkpoint.documentId, tabsOf(frozen), actor);
+    // The import provenance (front matter, verbatim source slices) comes back
+    // with the content, in the same write.
+    const sources = trustedSources(frozen, checkpoint.documentId);
+    const meta = trustedMeta(frozen, checkpoint.documentId);
+    let restoredMeta = false;
     const edits: PlannedEdit[] = tabsOf(frozen).map((tab) => {
       const content = pmDocOf(frozen.getXmlFragment(tabFragmentName(tab.id))).content;
       return {
@@ -183,27 +194,69 @@ export async function restoreCheckpoint(
       edits.push({ target, inverse: false, build: (tr) => void tr.replaceWith(0, tr.doc.content.size, content) });
     }
     // Widget rows first, as a publish does: viewers refetch when the block's hash changes.
-    await restoreWidgets(storage, checkpoint.bundleKey, frozen, checkpoint.documentId);
-    const out = await applyPlan(checkpoint.documentId, originFor(actor), { onConflict: 'refuse', edits });
-    await redrawBoundWidgets(checkpoint.documentId);
+    if (!suggesting) await restoreWidgets(storage, checkpoint.bundleKey, frozen, checkpoint.documentId);
+    const out = await applyPlan(checkpoint.documentId, originFor(actor), {
+      onConflict: 'refuse',
+      ...(suggesting
+        ? {
+            mode: 'suggest' as const,
+            guard: async () =>
+              (await widgetsChangedSince(frozen, checkpoint.documentId))
+                ? {
+                    code: 'forbidden' as const,
+                    message: 'This version has widgets that were published differently since; an agent that may only suggest cannot restore them.',
+                    fix: 'Ask a person who edits the document to restore this version.',
+                  }
+                : null,
+          }
+        : {}),
+      edits,
+      alsoWrite: (doc, outcomes) => {
+        if (suggesting || outcomes.some((o) => o.status === 'conflict')) return;
+        rewriteSources(doc, checkpoint.documentId, sources, { ...meta, format: trustedMeta(doc, checkpoint.documentId).format });
+        restoredMeta = true;
+      },
+      afterWrite: async () => {
+        if (!restoredMeta) return;
+        const metadata = meta.frontMatter ? splitFrontMatter(meta.frontMatter).data : {};
+        await db.update(documents).set({ metadata }).where(eq(documents.id, checkpoint.documentId));
+      },
+    });
+    if (!suggesting) await redrawBoundWidgets(checkpoint.documentId);
     return out;
   } finally {
     frozen.destroy();
   }
 }
 
-/** Thread ids whose comment mark is in a state's tabs. */
-export function markedThreads(state: Uint8Array): Set<string> {
+/**
+ * Which open threads a captured state anchors, by the rules live anchoring
+ * uses: a marked thread (prose, or carried over from before the document
+ * went live) while its comment mark is in reachable content (tab, page text,
+ * embed and widget label fragments), a structured one (block, widget part,
+ * data point) while its target is; a widget part or data point also needs
+ * the published widget to draw it (writeCheckpoint checks that).
+ */
+export function anchoredIn(state: Uint8Array): (thread: { id: string; anchor: unknown }) => boolean {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, state);
-  const ids = new Set<string>();
-  for (const tab of tabsOf(doc)) {
-    pmDocOf(doc.getXmlFragment(tabFragmentName(tab.id))).descendants((node) => {
-      for (const mark of node.marks) if (mark.type.name === 'comment' && !mark.attrs.orphan) ids.add(mark.attrs.threadId as string);
+  const marked = new Set<string>();
+  // Reachable fragment names, and `<fragment> <blockId>` for their blocks.
+  const present = new Set<string>();
+  for (const name of reachableFragments(doc)) {
+    present.add(name);
+    pmDocOf(doc.getXmlFragment(name)).descendants((node) => {
+      if (node.type.isInGroup('bnBlock')) present.add(`${name} ${node.attrs.id as string}`);
+      for (const mark of node.marks) if (mark.type.name === 'comment' && !mark.attrs.orphan) marked.add(mark.attrs.threadId as string);
     });
   }
   doc.destroy();
-  return ids;
+  return ({ id, anchor }) => {
+    if (marked.has(id)) return true;
+    if (!isLiveAnchor(anchor) || anchor.type === 'prose') return false;
+    const name = fragmentName(anchor.target);
+    return present.has(isTabFragment(name) ? `${name} ${anchor.target.blockId}` : name);
+  };
 }
 
 /** Sets the live tab list to `tabs` when it differs. The pipeline writes

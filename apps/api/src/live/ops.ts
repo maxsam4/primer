@@ -8,6 +8,7 @@ import {
   type BlockInput,
   type EditOutcome,
   type LiveBlockDTO,
+  type OpPosition,
   type Reconciliation,
   type Refusal,
   type Target,
@@ -40,12 +41,12 @@ export type ApplyOpsResult =
 
 /** One op, validated and converted, ready to become a PlannedEdit. */
 type Prepared =
-  | { op: 'add'; at: Target; position: 'before' | 'after'; nodes: PmNode[]; input: BlockInput[] }
+  | { op: 'add'; at: Target; position: OpPosition; nodes: PmNode[]; input: BlockInput[] }
   | { op: 'update'; target: Target; expectVersion: string; input: UpdateInput; raw: BlockInput }
   | { op: 'replaceRange'; from: Target; to: Target; expectVersions: Record<string, string>; nodes: PmNode[]; input: BlockInput[] }
   | { op: 'delete'; target: Target; expectVersion: string }
   | { op: 'pageText'; target: Target; expectVersion: string; text: string }
-  | { op: 'move'; target: Target; at: Target; position: 'before' | 'after'; expectVersion: string };
+  | { op: 'move'; target: Target; at: Target; position: OpPosition; expectVersion: string };
 
 /**
  * Agents edit a live document by block (plan M4.2). Every op is validated and
@@ -241,7 +242,7 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
     return { tabId: t.tabId, blockId: t.blockId };
   };
   const version = (v: unknown) => typeof v === 'string' && VERSION.test(v);
-  const position = op.position === 'before' || op.position === 'after' ? op.position : null;
+  const position = op.position === 'before' || op.position === 'after' || op.position === 'firstChild' ? op.position : null;
   const blocks = async (list: unknown): Promise<{ nodes: PmNode[]; input: BlockInput[] } | { error: string; fix: string }> => {
     if (!Array.isArray(list) || list.length === 0 || list.length > MAX_BLOCKS_PER_OP) {
       return { error: `\`blocks\` must list 1–${MAX_BLOCKS_PER_OP} blocks.`, fix: 'Send at least one block.' };
@@ -260,7 +261,7 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
     case 'add': {
       const at = target('at');
       if ('error' in at) return at;
-      if (!position) return { error: '`position` must be "before" or "after".', fix: 'Say where the blocks go relative to `at`.' };
+      if (!position) return { error: '`position` must be "before", "after" or "firstChild".', fix: 'Say where the blocks go relative to `at`.' };
       const b = await blocks(op.blocks);
       if ('error' in b) return b;
       return { op: 'add', at, position, ...b };
@@ -322,7 +323,7 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
       if ('error' in t) return t;
       const at = target('at');
       if ('error' in at) return at;
-      if (!position) return { error: '`position` must be "before" or "after".', fix: 'Say where the block goes relative to `at`.' };
+      if (!position) return { error: '`position` must be "before", "after" or "firstChild".', fix: 'Say where the block goes relative to `at`.' };
       if (!version(op.expectVersion)) return missingVersion('expectVersion');
       if (t.tabId !== at.tabId) return { error: 'A block moves within its tab.', fix: 'Pick an `at` block in the same tab.' };
       if (t.blockId === at.blockId) return { error: 'A block can\'t move relative to itself.', fix: 'Pick another `at` block.' };
@@ -369,7 +370,7 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
         target: p.at,
         build: guarded(p.at, (tr, at) => {
           if (!at) return gone(p.at);
-          tr.insert(p.position === 'before' ? at.pos : at.pos + at.node.nodeSize, Fragment.fromArray(p.nodes));
+          insertAt(tr, at, p.position, Fragment.fromArray(p.nodes));
         }),
       };
     case 'update':
@@ -407,8 +408,7 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
           }
           const removed = removeBlock(tr, at!);
           if (removed) return removed;
-          const there = findBlock(tr.doc, p.at.blockId)!;
-          tr.insert(p.position === 'before' ? there.pos : there.pos + there.node.nodeSize, node);
+          insertAt(tr, findBlock(tr.doc, p.at.blockId)!, p.position, node);
           bctx.moved(node.attrs.id as string);
         }),
       };
@@ -461,6 +461,19 @@ function rangeOf(doc: PmNode, at: NonNullable<Located>, toBlockId: string): { bl
     if (child.attrs.id === toBlockId) return { blocks, end: pos };
   }
   return null;
+}
+
+function insertAt(tr: Transform, at: NonNullable<Located>, position: OpPosition, content: Fragment | PmNode) {
+  if (position === 'firstChild') insertFirstChild(tr, at, content);
+  else tr.insert(position === 'before' ? at.pos : at.pos + at.node.nodeSize, content);
+}
+
+/** Inserts as the first child of `parent`, making its child group if it has none. */
+export function insertFirstChild(tr: Transform, parent: NonNullable<Located>, content: Fragment | PmNode) {
+  const group = parent.node.childCount > 1 ? parent.node.child(1) : null;
+  const end = parent.pos + parent.node.nodeSize - 1;
+  if (group) tr.insert(end - group.nodeSize + 1, content);
+  else tr.insert(end, tr.doc.type.schema.nodes.blockGroup!.create(null, content));
 }
 
 /** Removes a block; a last child takes its (then empty) group with it. The
