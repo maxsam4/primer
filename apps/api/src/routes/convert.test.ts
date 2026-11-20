@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { _resetRateLimiterForTests } from '../lib/rateLimiter.ts';
 import type { ConvertMarkdownResponse } from '@polygonlabs/primer-api-types';
 import { createApp } from '../app.ts';
@@ -12,7 +15,9 @@ const SOURCE = '# Plan\n\nShip **the editor** first.\n\n- one\n- two\n\n| a | b 
 const bare = (b: ImportedBlock): unknown => ({ type: b.type, props: b.props, content: b.content, children: b.children.map(bare) });
 
 describe('POST /api/convert/markdown', () => {
-  const app = createApp({ storage: new FilesystemStorage('/tmp/primer-convert-test'), notifier: new NoopNotifier() });
+  const root = mkdtempSync(join(tmpdir(), 'primer-convert-test-'));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const app = createApp({ storage: new FilesystemStorage(root), notifier: new NoopNotifier() });
   const post = (body: unknown) =>
     app.request('/api/convert/markdown', { method: 'POST', headers: { ...CSRF_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
