@@ -24,6 +24,9 @@ export interface ScopedRoute {
 export const ROUTE_SCOPES: readonly ScopedRoute[] = [
   { method: 'GET', path: '/api/me', scope: null },
   { method: 'POST', path: '/mcp', scope: null },
+  // 405 for every token (mcp/routes.ts), so an MCP client opens no event stream.
+  { method: 'GET', path: '/mcp', scope: null },
+  { method: 'DELETE', path: '/mcp', scope: null },
 
   { method: 'GET', path: '/api/library', scope: 'documents:read' },
   { method: 'GET', path: '/api/documents/:docId', scope: 'documents:read' },

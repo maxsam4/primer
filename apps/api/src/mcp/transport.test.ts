@@ -53,6 +53,20 @@ beforeEach(async () => {
   await db.delete(oauthClients);
 });
 
+describe('GET /mcp', () => {
+  it('answers 405 so a client opens no event stream', async () => {
+    const { token } = await seedAccessToken();
+    await withApp(async (app) => {
+      const res = await app.request('/mcp', {
+        method: 'GET',
+        headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(405);
+      expect(res.headers.get('allow')).toBe('POST');
+    });
+  });
+});
+
 describe('POST /mcp', () => {
   it('returns 401 with WWW-Authenticate when no bearer is present', async () => {
     await withApp(async (app) => {
