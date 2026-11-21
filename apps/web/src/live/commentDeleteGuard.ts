@@ -7,8 +7,9 @@ export const ALLOW_COMMENTED_DELETE = 'primer:allowCommentedDelete';
 export type HeldDelete = {
   /** Quotes of the open threads whose text the change removes. */
   quotes: string[];
-  /** Applies the held change (if the document hasn't moved on). */
-  confirm: () => void;
+  /** Applies the held change when the document hasn't moved on; false when it
+   *  has, and nothing was applied. */
+  confirm: () => boolean;
 };
 
 /**
@@ -34,7 +35,9 @@ export function commentDeleteGuard(opts: {
         quotes: [...removed].map(opts.quoteOf),
         confirm: () => {
           // Only the change that was held, against the document it was made on.
-          if (opts.currentDoc().eq(tr.before)) opts.dispatch(tr.setMeta(ALLOW_COMMENTED_DELETE, true));
+          if (!opts.currentDoc().eq(tr.before)) return false;
+          opts.dispatch(tr.setMeta(ALLOW_COMMENTED_DELETE, true));
+          return true;
         },
       });
       return false;

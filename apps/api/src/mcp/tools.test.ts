@@ -1128,6 +1128,33 @@ describe('collaborator tools (#98)', () => {
     });
   });
 
+  it('adding by email needs users:read on a scoped token; a userId does not', async () => {
+    await seedUser('tools-c-owner');
+    await seedUser('tools-c-guest');
+    const { docId } = await seedDocOwnedBy('tools-c-owner');
+    await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, docId));
+    await withSpy(async (deps) => {
+      const h = buildMcpToolHandlers(deps);
+      const owner = person('tools-c-owner');
+      const byEmail = await h.primer_add_collaborator({ documentId: docId, email: 'tools-c-guest@x.test', role: 'commenter' }, owner, ['collaborators:manage']);
+      expect(parse(byEmail).code).toBe('forbidden');
+      const byId = await h.primer_add_collaborator({ documentId: docId, userId: 'tools-c-guest', role: 'commenter' }, owner, ['collaborators:manage']);
+      expect(byId.isError).toBeFalsy();
+    });
+  });
+
+  it("an agent's person is an owner too and cannot be added as a collaborator", async () => {
+    await seedUser('tools-c-person');
+    await seedAgent('tools-c-bot', 'tools-c-person');
+    const { docId } = await seedDocOwnedBy('tools-c-bot');
+    await withSpy(async (deps, spy) => {
+      const h = buildMcpToolHandlers(deps);
+      const res = await h.primer_add_collaborator({ documentId: docId, userId: 'tools-c-person', role: 'editor' }, agent('tools-c-bot', 'tools-c-person'));
+      expect(parse(res).code).toBe('owner_not_collaborator');
+      expect(spy.calls).toHaveLength(0);
+    });
+  });
+
   it('adding the caller (the service account) is rejected', async () => {
     await seedUser('tools-c-service');
     const { docId } = await seedDocOwnedBy('tools-c-service');

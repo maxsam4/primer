@@ -12,13 +12,13 @@ type Meta = { orphaned?: boolean; quote?: string };
  * exactly or reworded on the server (never automatically); any thread can be
  * promoted into a new document, one quote block per comment.
  */
-export function ThreadActions({ store, canPromote }: { store: PrimerThreadStore; canPromote: boolean }) {
+export function ThreadActions({ store, canPromote, canReanchor }: { store: PrimerThreadStore; canPromote: boolean; canReanchor: boolean }) {
   const [threads, setThreads] = useState<ThreadData[]>(() => [...store.getThreads().values()]);
   const [message, setMessage] = useState<string | null>(null);
   useEffect(() => store.subscribe((all) => setThreads([...all.values()])), [store]);
 
   const open = threads.filter((th) => !th.resolved);
-  const orphaned = open.filter((th) => (th.metadata as Meta).orphaned);
+  const orphaned = canReanchor ? open.filter((th) => (th.metadata as Meta).orphaned) : [];
   if (open.length === 0) return null;
 
   const reanchor = async (id: string) => {

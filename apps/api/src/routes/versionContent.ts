@@ -45,7 +45,8 @@ export function registerVersionContentRoute(
     const page = await loadReadablePage(deps.storage, c.req.param('versionId'), c.get('user'));
     if (!page) return c.json({ error: 'not_found' }, 404);
     const body: PageInfoResponse = { documentId: page.documentId, versionId: page.versionId, policy: pagePolicyOf(page.html) };
-    if (page.bundleKey && readsRecords(page.html)) body.frozen = true;
+    // Frozen only when the checkpoint really holds records: a page bound to none would find no records at all.
+    if (page.bundleKey && readsRecords(page.html) && (await readFrozenRecords(deps.storage, page.bundleKey)) !== null) body.frozen = true;
     return c.json(body, 200);
   });
 }

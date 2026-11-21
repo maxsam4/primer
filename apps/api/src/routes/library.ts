@@ -47,6 +47,8 @@ export function registerLibraryRoute(app: Hono<{ Variables: AppVariables }>): vo
   app.get('/api/library', async (c) => {
     // An agent browses its person's library (lib/permissions.ts).
     const userId = libraryOwnerId(c.get('user'));
+    // Grants made to the agent itself count too (loadEffectiveRole checks both ids).
+    const actorId = c.get('user').id;
 
     // Docs in the caller's library: own OR collaborator OR org-doc-they've-opened.
     const docRows = (await db.execute(sql`
@@ -73,7 +75,7 @@ export function registerLibraryRoute(app: Hono<{ Variables: AppVariables }>): vo
         CASE
           WHEN ${isSelfOrAgentOf(sql`d.uploader_id`, userId)} THEN 'mine'
           WHEN EXISTS (SELECT 1 FROM document_collaborators dc
-                         WHERE dc.document_id = d.id AND dc.user_id = ${userId}) THEN 'collaborator'
+                         WHERE dc.document_id = d.id AND dc.user_id IN (${userId}, ${actorId})) THEN 'collaborator'
           ELSE 'org'
         END                 AS ownership,
         COUNT(DISTINCT vt.thread_id) FILTER (WHERE vt.thread_id IS NOT NULL)::int                              AS "threadCount",
@@ -99,7 +101,7 @@ export function registerLibraryRoute(app: Hono<{ Variables: AppVariables }>): vo
           -- direct URL, per the PRD's "no global feed" rule.
           ${isSelfOrAgentOf(sql`d.uploader_id`, userId)}
           OR EXISTS (SELECT 1 FROM document_collaborators dc
-                       WHERE dc.document_id = d.id AND dc.user_id = ${userId})
+                       WHERE dc.document_id = d.id AND dc.user_id IN (${userId}, ${actorId}))
           OR (d.visibility = 'org' AND EXISTS (
                 SELECT 1 FROM document_views dv
                  WHERE dv.document_id = d.id AND dv.user_id = ${userId}))
@@ -121,7 +123,7 @@ export function registerLibraryRoute(app: Hono<{ Variables: AppVariables }>): vo
                         ${isSelfOrAgentOf(sql`d.uploader_id`, userId)}
                         OR EXISTS (
                           SELECT 1 FROM document_collaborators dc
-                           WHERE dc.document_id = d.id AND dc.user_id = ${userId}
+                           WHERE dc.document_id = d.id AND dc.user_id IN (${userId}, ${actorId})
                         )
                         OR (d.visibility = 'org' AND EXISTS (
                           SELECT 1 FROM document_views dv

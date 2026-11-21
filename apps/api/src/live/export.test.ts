@@ -5,9 +5,9 @@ import type { PlannedEdit } from './pipeline.ts';
 import { applyPlan } from './pipeline.ts';
 import { SYSTEM_ORIGIN } from './origin.ts';
 import { buildLiveDoc, importMarkdown, importText } from './import.ts';
-import { exportMarkdown, exportText } from './export.ts';
+import { exportHtml, exportMarkdown, exportText } from './export.ts';
 import { readBlocks } from './editor.ts';
-import { createLiveDoc, withLiveDoc } from './live.testlib.ts';
+import { createLiveDoc, seedBlocks, withLiveDoc } from './live.testlib.ts';
 
 const fixtures = new URL('./__fixtures__/', import.meta.url);
 const fixture = (name: string) => readFileSync(new URL(name, fixtures), 'utf8');
@@ -145,5 +145,35 @@ describe('export', () => {
       for (const [key, value] of Object.entries(copied)) doc.getMap('sources').set(key, value);
     });
     expect(await exportOf(id)).not.toContain('HIDDEN');
+  });
+
+  it('embeds export as text and columns export in reading order', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [
+      { id: 'e1', type: 'embed', props: { url: 'https://example.com/page' } } as never,
+      { id: 'e2', type: 'embed', props: { url: 'javascript:alert(1)' } } as never,
+      {
+        id: 'cols',
+        type: 'columnList',
+        children: [
+          { id: 'c1', type: 'column', children: [{ id: 'a', type: 'paragraph', content: 'Left' }] },
+          { id: 'c2', type: 'column', children: [{ id: 'b', type: 'paragraph', content: 'Right' }] },
+        ],
+      } as never,
+    ]);
+    const text = await withLiveDoc(id, (doc) => exportText(doc, id));
+    expect(text).toContain('https://example.com/page');
+    expect(text).not.toContain('javascript:');
+    const markdown = await withLiveDoc(id, (doc) => exportMarkdown(doc, id));
+    expect(markdown.indexOf('Left')).toBeGreaterThanOrEqual(0);
+    expect(markdown.indexOf('Left')).toBeLessThan(markdown.indexOf('Right'));
+  });
+
+  it('static HTML inlines the document images', async () => {
+    const png = 'primer-blob://01900000-0000-7000-8000-0000000000aa';
+    const doc = buildLiveDoc(await importMarkdown(`![pic](${png})\n`), 'markdown', 'doc-img');
+    const html = await exportHtml(doc, 'T', new Map(), async () => ({ contentType: 'image/png', bytes: Uint8Array.from([1, 2, 3]) }));
+    expect(html).toContain('data:image/png;base64,AQID');
+    expect(html).not.toContain(png);
   });
 });

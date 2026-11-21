@@ -606,18 +606,23 @@
   }
 
   /** An element's text by the server's rule (page/stamp.ts pageText): <br>
-   *  is a newline; outside <pre> each line's whitespace collapses. */
+   *  is a newline; outside <pre> every whitespace run (newlines in the source
+   *  too) collapses to one space and each line is trimmed. */
   function pidText(el) {
+    const pre = !!el.closest('pre');
+    // Source whitespace (a hard-wrapped paragraph's newlines too) is a space
+    // outside <pre>; only <br> is a newline.
+    const flow = (text) => (pre ? text : text.replace(/[ \t\n\r\f]+/g, ' '));
     let raw = '';
     el.childNodes.forEach((node) => {
-      if (node.nodeType === Node.TEXT_NODE) raw += node.nodeValue;
+      if (node.nodeType === Node.TEXT_NODE) raw += flow(node.nodeValue);
       else if (node.nodeName === 'BR') raw += '\n';
-      else if (node.nodeType === Node.ELEMENT_NODE) raw += node.textContent || '';
+      else if (node.nodeType === Node.ELEMENT_NODE) raw += flow(node.textContent || '');
     });
-    if (el.closest('pre')) return raw;
+    if (pre) return raw;
     return raw
       .split('\n')
-      .map((line) => line.replace(/[ \t\r\f]+/g, ' ').trim())
+      .map((line) => line.trim())
       .join('\n');
   }
 
@@ -828,15 +833,27 @@
         rows.sort((a, b) => {
           const x = a.data ? a.data[o.key] : undefined;
           const y = b.data ? b.data[o.key] : undefined;
-          if (x === y) return a.recordId < b.recordId ? -1 : 1;
-          if (x === undefined || x === null) return 1;
-          if (y === undefined || y === null) return -1;
-          return (x < y ? -1 : 1) * sign;
+          // As the live query orders: a missing key last, then by JSON type
+          // (null < string < number < boolean < array < object), JSON null a value.
+          if (x === undefined && y === undefined) return a.recordId < b.recordId ? -1 : 1;
+          if (x === undefined) return 1;
+          if (y === undefined) return -1;
+          const rx = jsonRank(x);
+          const ry = jsonRank(y);
+          if (rx !== ry) return (rx < ry ? -1 : 1) * sign;
+          const kx = rx >= 4 ? JSON.stringify(x) : x;
+          const ky = rx >= 4 ? JSON.stringify(y) : y;
+          if (kx === ky) return a.recordId < b.recordId ? -1 : 1;
+          return (kx < ky ? -1 : 1) * sign;
         });
       }
     }
     const page = rows.slice(offset, offset + limit).map(dto);
     return { ok: true, value: { records: page, nextCursor: rows.length > offset + limit ? 'f:' + (offset + limit) : null } };
+  }
+
+  function jsonRank(v) {
+    return v === null ? 0 : typeof v === 'string' ? 1 : typeof v === 'number' ? 2 : typeof v === 'boolean' ? 3 : Array.isArray(v) ? 4 : 5;
   }
 
   function callRecords(verb, args, opts) {

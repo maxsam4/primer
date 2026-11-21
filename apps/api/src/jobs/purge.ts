@@ -42,8 +42,9 @@ export async function purgeExpiredDocuments(deps: { storage: Storage }): Promise
       versionKeys.push(
         ...(v.bundleKey ? await bundleStorageKeys(deps.storage, v.bundleKey) : [v.storageKey]),
         ...(v.originalKey ? [v.originalKey] : []),
-        // A live page's stamped source, published with its checkpoint.
-        ...(v.bundleKey && v.sourceFormat === 'html' ? [sourceKeyOf(docId, v.id)] : []),
+        // A live page's stamped source, published (or copied) with its checkpoint;
+        // deleting a key that was never written is a no-op.
+        ...(v.bundleKey ? [sourceKeyOf(docId, v.id)] : []),
       );
     }
     const fileRows = await db.select({ storageKey: docFiles.storageKey }).from(docFiles).where(eq(docFiles.documentId, docId));

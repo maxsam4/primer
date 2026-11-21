@@ -64,7 +64,8 @@ type CalloutViewProps = {
 function CalloutView({ block, editor, contentRef }: CalloutViewProps) {
   const text = useBlockText();
   // Only the live editor (which provides services) changes the kind; exports and static renders show it.
-  const editable = editor.isEditable && usePrimerBlockServices() !== null;
+  const services = usePrimerBlockServices();
+  const editable = editor.isEditable && services !== null;
   const kind = calloutKind(block.props.kind);
   return (
     <div className="primer-callout" data-primer-callout={kind}>

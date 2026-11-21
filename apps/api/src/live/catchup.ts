@@ -130,17 +130,19 @@ export async function getCatchUp(actor: AuthUser, documentId: string, since: Cat
   }
 
   // ── Everything else, from Primer's own events ──
-  const events = ((await db.execute(sql`
+  const rows = (await db.execute(sql`
     SELECT id, type, author_id AS "authorId", payload, created_at AS at
       FROM events
      WHERE document_id = ${documentId} AND namespace = 'primer' AND audience = 'readers' AND created_at > ${sinceAt.toISOString()}::timestamptz
+       AND (author_id IS NULL OR author_id NOT IN (${sql.join(excluded.map((id) => sql`${id}`), sql`, `)}))
        AND type IN ('comment.created', 'thread.resolved', 'decision.made', 'decision.cleared', 'suggestion.created',
                     'suggestion.decided', 'task.created', 'task.updated', 'task.deleted', 'version.published')
      ORDER BY id
      LIMIT ${MAX_EVENTS}
-  `)) as unknown as EventRow[])
-    .map((e) => ({ ...e, payload: typeof e.payload === 'string' ? (JSON.parse(e.payload) as Record<string, unknown>) : e.payload }))
-    .filter((e) => !isOwn(e.authorId));
+  `)) as unknown as EventRow[];
+  const events = rows.map((e) => ({ ...e, payload: typeof e.payload === 'string' ? (JSON.parse(e.payload) as Record<string, unknown>) : e.payload }));
+  // Past the cap the rest is still to come: `until` stops at the last event read, so a consumer that continues from it misses none.
+  const untilAt = rows.length === MAX_EVENTS ? new Date(rows[rows.length - 1]!.at) : new Date();
   const ids = (type: string, key: string) =>
     events.filter((e) => e.type === type).map((e) => e.payload[key]).filter((v): v is string => typeof v === 'string' && UUID_RE.test(v));
 
@@ -177,9 +179,9 @@ export async function getCatchUp(actor: AuthUser, documentId: string, since: Cat
   );
   const decided = new Map(
     ((await db.execute(sql`
-      SELECT block_id AS "blockId", question, option_label AS "optionLabel", rationale
+      SELECT block_id AS "blockId", option_id AS "optionId", decided_by AS "decidedBy", question, option_label AS "optionLabel", rationale
         FROM doc_decisions WHERE document_id = ${documentId} AND archived_at IS NULL
-    `)) as unknown as { blockId: string; question: string; optionLabel: string; rationale: string }[]).map((d) => [d.blockId, d]),
+    `)) as unknown as { blockId: string; optionId: string; decidedBy: string; question: string; optionLabel: string; rationale: string }[]).map((d) => [d.blockId, d]),
   );
 
   const threads: CatchUpThread[] = [];
@@ -216,7 +218,8 @@ export async function getCatchUp(actor: AuthUser, documentId: string, since: Cat
         const blockId = String(p.block_id);
         const entry: CatchUpDecision = { blockId, event: e.type === 'decision.made' ? 'made' : 'cleared', by, at };
         const d = decided.get(blockId);
-        if (entry.event === 'made' && d) Object.assign(entry, { question: text(d.question), optionLabel: text(d.optionLabel), rationale: text(d.rationale) });
+        // The standing decision describes this event only when it is this pick (a later one replaced it otherwise).
+        if (entry.event === 'made' && d && d.optionId === p.option_id && d.decidedBy === by) Object.assign(entry, { question: text(d.question), optionLabel: text(d.optionLabel), rationale: text(d.rationale) });
         decisions.push(entry);
         break;
       }
@@ -265,7 +268,7 @@ export async function getCatchUp(actor: AuthUser, documentId: string, since: Cat
     documentId,
     title: doc.title,
     since: { at: sinceAt.toISOString(), docVersion: live ? sinceVersion : null },
-    until: { at: new Date().toISOString(), docVersion: untilVersion },
+    until: { at: untilAt.toISOString(), docVersion: untilVersion },
     people: [...people.values()],
     changedBlocks,
     moreChangedBlocks,
@@ -298,17 +301,21 @@ export function isEmptyCatchUp(c: CatchUpDTO): boolean {
  */
 export async function getDigest(actor: AuthUser, since: Date): Promise<DigestResponse> {
   const me = libraryOwnerId(actor);
+  // Only what others did counts toward the candidates (and the limit): the
+  // caller's own activity never shows in a catch-up, so it must not crowd out
+  // a document someone else changed.
+  const own = sql.join([...new Set([actor.id, me])].map((id) => sql`${id}`), sql`, `);
   const candidates = (await db.execute(sql`
     SELECT d.id,
-           greatest((SELECT max(e.created_at) FROM events e WHERE e.document_id = d.id AND e.namespace = 'primer' AND e.created_at > ${since.toISOString()}::timestamptz),
-                    (SELECT max(u.created_at) FROM doc_updates u WHERE u.document_id = d.id AND u.created_at > ${since.toISOString()}::timestamptz)) AS last
+           greatest((SELECT max(e.created_at) FROM events e WHERE e.document_id = d.id AND e.namespace = 'primer' AND e.created_at > ${since.toISOString()}::timestamptz AND (e.author_id IS NULL OR e.author_id NOT IN (${own}))),
+                    (SELECT max(u.created_at) FROM doc_updates u WHERE u.document_id = d.id AND u.created_at > ${since.toISOString()}::timestamptz AND (u.actor_id IS NULL OR u.actor_id NOT IN (${own})))) AS last
       FROM documents d
      WHERE d.deleted_at IS NULL
        AND (d.uploader_id = ${me} OR d.uploader_id IN (SELECT a.id FROM users a WHERE a.via_user_id = ${me})
             OR EXISTS (SELECT 1 FROM document_collaborators dc WHERE dc.document_id = d.id AND dc.user_id IN (${me}, ${actor.id}))
             OR (d.visibility = 'org' AND EXISTS (SELECT 1 FROM document_views dv WHERE dv.document_id = d.id AND dv.user_id = ${me})))
-       AND (EXISTS (SELECT 1 FROM events e WHERE e.document_id = d.id AND e.namespace = 'primer' AND e.created_at > ${since.toISOString()}::timestamptz)
-            OR EXISTS (SELECT 1 FROM doc_updates u WHERE u.document_id = d.id AND u.created_at > ${since.toISOString()}::timestamptz))
+       AND (EXISTS (SELECT 1 FROM events e WHERE e.document_id = d.id AND e.namespace = 'primer' AND e.created_at > ${since.toISOString()}::timestamptz AND (e.author_id IS NULL OR e.author_id NOT IN (${own})))
+            OR EXISTS (SELECT 1 FROM doc_updates u WHERE u.document_id = d.id AND u.created_at > ${since.toISOString()}::timestamptz AND (u.actor_id IS NULL OR u.actor_id NOT IN (${own}))))
      ORDER BY last DESC NULLS LAST
      LIMIT ${MAX_DIGEST_DOCS}
   `)) as unknown as { id: string }[];

@@ -29,7 +29,8 @@ export async function snapshotRecords(documentId: string): Promise<RecordsSnapsh
     writtenBy: string;
     toChangeId: number | string;
   }[];
-  const collections: RecordsSnapshot['collections'] = {};
+  // No prototype: a collection may be named `constructor` or `toString`.
+  const collections: RecordsSnapshot['collections'] = Object.create(null);
   for (const r of rows) {
     if (r.collection === null) continue;
     (collections[r.collection] ??= []).push({

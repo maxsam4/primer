@@ -55,7 +55,8 @@ function pick(raw: Record<string, unknown>, keys: readonly string[]): Record<str
 }
 
 /** The arguments the server will see: only the keys a page may choose. */
-export function boundArgs(verb: MsgRecordsCall['verb'], args: Record<string, unknown>): Record<string, unknown> {
+export function boundArgs(verb: MsgRecordsCall['verb'], rawArgs: unknown): Record<string, unknown> {
+  const args = typeof rawArgs === 'object' && rawArgs !== null && !Array.isArray(rawArgs) ? (rawArgs as Record<string, unknown>) : {};
   if (verb === 'changesSince') return pick(args, ['changeId', 'limit']);
   if (verb === 'batch') {
     const ops = Array.isArray(args.ops) ? args.ops : [];
@@ -108,7 +109,14 @@ export function createRecordsCapability(opts: RecordsCapabilityOptions): Records
         return;
       }
       const args = boundArgs(msg.verb, msg.args);
-      const body = JSON.stringify(args);
+      let body: string;
+      try {
+        body = JSON.stringify(args);
+      } catch {
+        // BigInt or a circular structure survives postMessage but not JSON.
+        answer({ ok: false, refusal: refusal('bad_request', 'The call arguments are not JSON-serializable.', 'Send plain JSON values.') });
+        return;
+      }
       if (new TextEncoder().encode(body).byteLength > MAX_RECORDS_CALL_BYTES) {
         answer({ ok: false, refusal: refusal('bad_request', `A record call carries at most ${MAX_RECORDS_CALL_BYTES} bytes.`, 'Send less data per call.') });
         return;

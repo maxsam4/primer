@@ -27,10 +27,19 @@ for (const [net, bits] of [
   NON_PUBLIC.addSubnet(net, bits, 'ipv6');
 }
 
+NON_PUBLIC.addSubnet('3fff::', 20, 'ipv6');
+
+/** IPv6 addresses are public only inside the global unicast block 2000::/3
+ *  (less the special-purpose ranges above): the rest of the space is reserved
+ *  or private (site-local fec0::, 5f00::, ...). */
+const GLOBAL_UNICAST_V6 = new BlockList();
+GLOBAL_UNICAST_V6.addSubnet('2000::', 3, 'ipv6');
+
 /** Whether `address` (an IP literal) is a public unicast address. */
 export function isPublicAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 0) return false;
+  if (family === 6 && !GLOBAL_UNICAST_V6.check(address, 'ipv6')) return false;
   return !NON_PUBLIC.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 

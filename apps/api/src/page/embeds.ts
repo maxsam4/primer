@@ -8,6 +8,7 @@ import type { PartialBlock } from '@blocknote/core';
 import type { Refusal } from '@polygonlabs/primer-api-types';
 import { serverEditor, type PrimerBlock } from '../live/editor.ts';
 import { escapeText } from './splice.ts';
+import { MAX_NESTING, PageTooDeep } from './stamp.ts';
 
 type Node = DefaultTreeAdapterMap['node'];
 type Element = DefaultTreeAdapterMap['element'];
@@ -35,8 +36,9 @@ export function readEmbeds(original: string): { embeds: Embed[] } | { refusal: R
   const seen = new Set<string>();
   let refusal: Refusal | null = null;
 
-  const visit = (node: Node, path: string): void => {
+  const visit = (node: Node, path: string, depth = 0): void => {
     if (refusal || !('tagName' in node)) return;
+    if (depth > MAX_NESTING) throw new PageTooDeep();
     const el = node as Element;
     const kind = el.tagName.startsWith('primer-') ? (el.tagName.slice(7) as EmbedKind) : null;
     if (kind && (EMBED_KINDS as readonly string[]).includes(kind)) {
@@ -58,7 +60,7 @@ export function readEmbeds(original: string): { embeds: Embed[] } | { refusal: R
       if (!('tagName' in child)) continue;
       const n = counts.get(child.tagName) ?? 0;
       counts.set(child.tagName, n + 1);
-      visit(child, `${path ? `${path}/` : ''}${child.tagName}[${n}]`);
+      visit(child, `${path ? `${path}/` : ''}${child.tagName}[${n}]`, depth + 1);
     }
   };
   for (const child of doc.childNodes) visit(child, '');

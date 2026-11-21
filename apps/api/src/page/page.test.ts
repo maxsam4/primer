@@ -17,6 +17,16 @@ const PAGE = `<!doctype html><html><head><script>/* chart */</script></head><bod
 </body></html>`;
 
 describe('page documents', () => {
+  it('a republish reseeds only the embeds whose source changed', async () => {
+    const { stamped } = stampPage(PAGE);
+    const same = await seedPage({ tabId: 'main', blockId: 'pg', stamped, pids: [], previous: stamped });
+    expect(same).toEqual([]);
+
+    const changed = stampPage(PAGE.replace('const a = 1', 'const a = 2')).stamped;
+    const edits = await seedPage({ tabId: 'main', blockId: 'pg', stamped: changed, pids: [], previous: stamped });
+    expect(edits.map((e) => e.target.embedId)).toEqual(['snippet']);
+  });
+
   it('untouched page exports the original byte for byte (with pid attributes)', async () => {
     const { stamped } = stampPage(PAGE);
     const id = await createLiveDoc();

@@ -37,6 +37,9 @@ export interface EventSourceLike {
   onmessage: ((ev: { data: string; lastEventId?: string }) => void) | null;
   onopen: ((ev: unknown) => void) | null;
   onerror: ((ev: unknown) => void) | null;
+  /** EventSource's readyState: 2 (CLOSED) after an error means it gave up
+   *  (a non-200 reply, e.g. a 502 during a rollout) and will not reconnect. */
+  readonly readyState?: number;
   close(): void;
 }
 
@@ -65,11 +68,14 @@ export interface EventsFeed {
   /** Hydrates the list (one relay batch), then subscribes to the stream. */
   start(): Promise<void>;
   stop(): void;
-  /** Call on page-visibility regain (or any doubt): full re-hydrate. */
+  /** Call on page-visibility regain (or any doubt): full re-hydrate. Not limited
+   *  to ids above the highest seen: rows that became readable after an access
+   *  change sit below it. The seen-set drops what was already relayed. */
   refresh(): Promise<void>;
 }
 
 const DEFAULT_COALESCE_MS = 25;
+const MAX_RECONNECT_MS = 30_000;
 
 /** Browser glue: adapts a real EventSource to the injectable interface
  *  (the native handler-property types don't structurally match the minimal
@@ -80,6 +86,9 @@ export function browserEventSourceFactory(url: string): EventSourceLike {
     onmessage: null,
     onopen: null,
     onerror: null,
+    get readyState() {
+      return es.readyState;
+    },
     close: () => es.close(),
   };
   es.onmessage = (ev) => like.onmessage?.({ data: String(ev.data), lastEventId: ev.lastEventId });
@@ -109,6 +118,8 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
 
   let pending: EventRowDTO[] = [];
   let flushHandle: unknown = null;
+  let reconnectHandle: unknown = null;
+  let reconnectAttempts = 0;
 
   function relay(rows: EventRowDTO[]): void {
     const fresh = rows
@@ -158,17 +169,20 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
     relay(rows); // one batch — a (re-)fetch arrives as a single dispatch
   }
 
-  async function refresh(): Promise<void> {
+  async function resync(full: boolean): Promise<void> {
     if (stopped) return;
-    // Everything after the highest id seen: ids follow commit order, so
-    // nothing missed while disconnected can sit below it.
+    // A reconnect reads everything after the highest id seen: ids follow
+    // commit order, so nothing missed while disconnected can sit below it.
+    // A visibility regain reads it all (see `refresh`).
     try {
-      await hydrate(highestSeen);
+      await hydrate(full ? null : highestSeen);
     } catch {
       // Best-effort: the stream (or the next refresh) will catch us up.
     }
     if (!stopped) onResync?.();
   }
+
+  const refresh = () => resync(true);
 
   function subscribe(): void {
     if (stopped) return;
@@ -192,7 +206,22 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
     // the first included, re-reads and resyncs: the page's own queries (and
     // a failed initial hydrate) predate the stream.
     source.onopen = () => {
-      void refresh();
+      reconnectAttempts = 0;
+      void resync(false);
+    };
+    // A native EventSource retries a dropped connection but gives up on a
+    // non-200 reply; recreate it then, from the highest id seen, with backoff.
+    source.onerror = () => {
+      const failed = source;
+      if (stopped || failed === null || failed.readyState !== 2) return;
+      failed.close();
+      source = null;
+      if (reconnectHandle !== null) return;
+      const delay = Math.min(MAX_RECONNECT_MS, 1000 * 2 ** reconnectAttempts++);
+      reconnectHandle = setTimeoutImpl(() => {
+        reconnectHandle = null;
+        subscribe();
+      }, delay);
     };
   }
 
@@ -214,6 +243,10 @@ export function createEventsFeed(opts: EventsFeedOptions): EventsFeed {
         flushHandle = null;
       }
       pending = [];
+      if (reconnectHandle !== null) {
+        clearTimeoutImpl(reconnectHandle);
+        reconnectHandle = null;
+      }
       source?.close();
       source = null;
     },

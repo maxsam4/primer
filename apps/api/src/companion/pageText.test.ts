@@ -33,6 +33,13 @@ async function boot(features: string[]) {
 }
 
 describe('page text bridge', () => {
+  it('a hard-wrapped paragraph reads as the server reads it', async () => {
+    document.body.innerHTML = '<p data-pid="p1">\n  A long paragraph wrapped\n  across lines.<br>\n  Second line.\n</p>';
+    const { posted } = await boot(['page-text']);
+    const report = posted.find((m) => m.type === 'page_elements') as { elements: { pid: string; text: string }[] };
+    expect(report.elements.map(({ text }) => text)).toEqual(['A long paragraph wrapped across lines.\nSecond line.']);
+  });
+
   it('set_page_texts only touches stamped nodes', async () => {
     document.body.innerHTML = [
       '<h1 data-pid="p1">Roadmap</h1>',

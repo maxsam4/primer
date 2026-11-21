@@ -162,6 +162,15 @@ describe('live hub', () => {
     expect(await upgradeAccepted(asPerson(OWNER))).toBe(true);
   });
 
+  it('refuses a malformed upgrade target without throwing', () => {
+    for (const target of ['//', 'http://[', 'http://a:99999/', '/collab/../x']) {
+      let destroyed = false;
+      const socket = { destroy: () => void (destroyed = true) };
+      expect(() => hub.handleUpgrade({ url: target } as never, socket as never, Buffer.alloc(0))).not.toThrow();
+      expect(destroyed).toBe(true);
+    }
+  });
+
   it('bearer connections are read-only', async () => {
     const id = await createLiveDoc({ uploaderId: OWNER });
     const { token, tokenHash, tokenPrefix } = generateToken();

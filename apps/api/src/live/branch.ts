@@ -1,5 +1,5 @@
 import * as Y from 'yjs';
-import type { Node as PmNode } from '@tiptap/pm/model';
+import { Fragment, Slice, type Node as PmNode } from '@tiptap/pm/model';
 import { Transform } from '@tiptap/pm/transform';
 import { eq, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
@@ -104,8 +104,12 @@ export async function proposeBranch(storage: Storage, actor: AuthUser, branchId:
   baseDoc.destroy();
   const plan = [...edits.filter((e) => !owned.refused.has(e.target.blockId)), ...owned.refused.values()];
 
-  await docQueue(parentId)(() => withdrawOpenSet(parentId, branchId, actor));
-  const result = await applyPlan(parentId, originFor(actor), { edits: plan, onConflict: 'suggest', mode: 'suggest', changeSetId: branchId });
+  // Withdrawing the old set and storing the new one are one step per branch,
+  // so overlapping proposals leave a single open batch.
+  const result = await docQueue(`propose:${branchId}`)(async () => {
+    await docQueue(parentId)(() => withdrawOpenSet(parentId, branchId, actor));
+    return applyPlan(parentId, originFor(actor), { edits: plan, onConflict: 'suggest', mode: 'suggest', changeSetId: branchId });
+  });
   return { ok: true, value: { ...result, documentId: parentId, changeSetId: branchId } };
 }
 
@@ -181,11 +185,13 @@ async function ownedToParent(storage: Storage, branchId: string, parentId: strin
   const owned: Owned = { pageSources: new Map(), widgetHashes: new Map(), refused: new Map() };
   const { pages, widgets } = await withLiveDocument(branchId, (doc) => ({ pages: pageBlocks(doc), widgets: widgetBlocks(doc) }));
   const basePages = new Map(pageBlocks(baseDoc).map((p) => [p.blockId, p]));
-  const read = async (key: string) => new Response(await storage.get(key)).text();
+  // An unreadable source (a key an editor wrote naming no object) is a page the branch can't prove is the base's: refused alone.
+  const read = async (key: string) => new Response(await storage.get(key)).text().catch(() => null);
   for (const page of pages) {
     if (!isOwnSourceKey(branchId, page.sourceKey)) continue;
     const base = basePages.get(page.blockId);
-    if (base && isOwnSourceKey(parentId, base.sourceKey) && (await read(page.sourceKey)) === (await read(base.sourceKey))) {
+    const mine = base && isOwnSourceKey(parentId, base.sourceKey) ? await read(page.sourceKey) : null;
+    if (base && mine !== null && mine === (await read(base.sourceKey))) {
       owned.pageSources.set(page.sourceKey, base.sourceKey);
     } else owned.refused.set(page.blockId, branchOnlyEdit(page, 'The page'));
   }
@@ -328,16 +334,22 @@ function tabEdits(at: Target, baseRoot: PmNode, branchRoot: PmNode, refused: Map
       }
       // Consecutive new siblings go in one edit: a suggestion builds against
       // the parent as it is, so separate ones would all anchor the same way.
-      if (run && run.nodes.at(-1)!.attrs.id === r.place.prevId) run.nodes.push(r.node);
+      // Blocks the parent already has (moved into this one) are not copied:
+      // their own move suggestions place them.
+      const fresh = withoutExisting(r.node, (blockId) => base.index.has(blockId));
+      if (run && run.nodes.at(-1)!.attrs.id === r.place.prevId) run.nodes.push(fresh);
       else {
-        run = { nodes: [r.node], place: r.place };
+        run = { nodes: [fresh], place: r.place };
         edits.push(insertRunEdit(at, run));
       }
       continue;
     }
     const changed = contentVersion(r.node) !== contentVersion(b.node);
     const moved = movedOnBranch.has(id);
-    if (changed || moved) edits.push(updateEdit({ ...at, blockId: id }, b.node, r.node, r.place, base, changed, moved));
+    if (changed || moved) {
+      const place = moved ? anchorMoved(id, r.place, branch, base, movedOnBranch) : r.place;
+      edits.push(updateEdit({ ...at, blockId: id }, b.node, r.node, place, base, changed, moved));
+    }
   }
   for (const id of base.order) {
     const b = base.index.get(id)!;
@@ -355,6 +367,34 @@ function holdsAny(node: PmNode, ids: Map<string, PlannedEdit>): boolean {
     return !found;
   });
   return found;
+}
+
+/**
+ * A moved block's place: after its previous sibling (already placed, as the
+ * edits go in branch order), else before the next sibling that did not move;
+ * a moved neighbour as the only anchor would keep the old order.
+ */
+function anchorMoved(id: string, place: BlockPlace, branch: Tree, base: Tree, moved: Set<string>): BlockPlace {
+  const sibs = branch.siblings.get(place.parentId ?? '') ?? [];
+  const next = sibs.slice(sibs.indexOf(id) + 1).find((s) => base.index.has(s) && !moved.has(s)) ?? null;
+  return { ...place, nextId: next };
+}
+
+/** `node` without the nested blocks `exists` names (and their subtrees). */
+function withoutExisting(node: PmNode, exists: (blockId: string) => boolean): PmNode {
+  const kept: PmNode[] = [];
+  node.forEach((child) => {
+    if (child.type.name !== 'blockGroup') {
+      kept.push(child);
+      return;
+    }
+    const blocks: PmNode[] = [];
+    child.forEach((block) => {
+      if (!exists(block.attrs.id as string)) blocks.push(withoutExisting(block, exists));
+    });
+    if (blocks.length > 0) kept.push(child.copy(Fragment.from(blocks)));
+  });
+  return node.copy(Fragment.from(kept));
 }
 
 function bothChanged(target: Target, why: string): Refusal {
@@ -390,7 +430,7 @@ function updateEdit(
       if (!ctx.suggesting && ((content && parentChanged) || (moved && parentMoved))) {
         return bothChanged(target, content && parentChanged ? 'was edited' : 'was moved');
       }
-      if (content) tr.replaceWith(at.pos + 1, at.pos + 1 + at.node.firstChild!.nodeSize, branchNode.firstChild!);
+      if (content) replaceContent(tr, at, branchNode.firstChild!);
       if (moved) {
         const now = findBlock(tr.doc, id)!;
         const removed = removeBlock(tr, now);
@@ -400,6 +440,40 @@ function updateEdit(
       }
     },
   };
+}
+
+/**
+ * The block's own content becomes the branch's. Text is changed only where it
+ * differs (comment marks aside), so a comment the parent added to unchanged
+ * text stays; annotation marks are not part of a block's version, so nothing
+ * else would flag them as a conflict.
+ */
+function replaceContent(tr: Transform, at: { pos: number; node: PmNode }, proposed: PmNode): void {
+  const current = at.node.firstChild!;
+  const from = at.pos + 1;
+  if (!current.inlineContent || !proposed.inlineContent || !current.sameMarkup(proposed)) {
+    tr.replaceWith(from, from + current.nodeSize, proposed);
+    return;
+  }
+  const comment = tr.doc.type.schema.marks.comment!;
+  const plain = (f: Fragment) => {
+    const nodes: PmNode[] = [];
+    f.forEach((n) => nodes.push(n.mark(n.marks.filter((m) => m.type !== comment))));
+    return Fragment.fromArray(nodes);
+  };
+  const a = plain(current.content);
+  const b = plain(proposed.content);
+  const start = a.findDiffStart(b);
+  if (start === null) return;
+  const end = a.findDiffEnd(b)!;
+  let endA = end.a;
+  let endB = end.b;
+  const overlap = start - Math.min(endA, endB);
+  if (overlap > 0) {
+    endA += overlap;
+    endB += overlap;
+  }
+  tr.replace(from + 1 + start, from + 1 + endA, new Slice(proposed.content.cut(start, endB), 0, 0));
 }
 
 function insertRunEdit(at: Target, run: { nodes: PmNode[]; place: BlockPlace }): PlannedEdit {

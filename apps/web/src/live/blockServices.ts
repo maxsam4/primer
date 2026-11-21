@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import * as Y from 'yjs';
 import {
   PRIMER_EVENT_NAMESPACE,
   type AssigneesResponse,
@@ -39,7 +40,24 @@ export type ChoiceStore = {
   subscribeAll(listener: () => void): () => void;
   /** Follows the document's event stream until the returned function runs. */
   connect(): () => void;
+  /** Re-reads the tallies when an update changes a choice or its options (a
+   *  removed or relabelled option changes what a tally counts). */
+  watch(doc: Y.Doc): () => void;
 };
+
+const CHOICE_REFRESH_MS = 500;
+
+/** Whether a transaction changed a choice block or anything inside one. */
+function touchesChoice(tr: Y.Transaction): boolean {
+  for (const changed of tr.changed.keys()) {
+    let type: Y.AbstractType<any> | null = changed;
+    while (type) {
+      if (type instanceof Y.XmlElement && (type.nodeName === 'choice' || type.nodeName === 'choiceOption')) return true;
+      type = (type._item?.parent as Y.AbstractType<any> | undefined) ?? null;
+    }
+  }
+  return false;
+}
 
 export function createChoiceStore(
   documentId: string,
@@ -123,6 +141,19 @@ export function createChoiceStore(
       };
       return () => stream.close();
     },
+    watch(doc) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onUpdate = (_update: Uint8Array, _origin: unknown, _doc: Y.Doc, tr: Y.Transaction) => {
+        if (!touchesChoice(tr)) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => refresh(), CHOICE_REFRESH_MS);
+      };
+      doc.on('update', onUpdate);
+      return () => {
+        doc.off('update', onUpdate);
+        clearTimeout(timer);
+      };
+    },
   };
 }
 
@@ -159,20 +190,21 @@ export function useEmbedState(documentId: string, blockId: string, url: string, 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ask = async (attempt: number) => {
       let answer: EmbedState = { status: 'none' };
-      let current = false;
+      // Only an answer for another URL (the document changed under the request) is worth asking again.
+      let stale = false;
       try {
         const res = await fetchImpl(`/api/documents/${encodeURIComponent(documentId)}/embeds/${encodeURIComponent(blockId)}`);
         if (res.ok) {
           const body = (await res.json()) as EmbedResponse;
-          current = embedUrl(body.echo.url) === url && embedDocumentId(body.echo.documentId) === targetId;
-          if (body.kind === 'link') answer = { status: 'link', url: body.url, title: body.title, description: body.description, siteName: body.siteName, image: body.image };
+          if (embedUrl(body.echo.url) !== url || embedDocumentId(body.echo.documentId) !== targetId) stale = true;
+          else if (body.kind === 'link') answer = { status: 'link', url: body.url, title: body.title, description: body.description, siteName: body.siteName, image: body.image };
           else if (body.kind === 'document') answer = { status: 'document', documentId: body.documentId, title: body.title, excerpt: body.excerpt };
         }
       } catch {
         // Offline: nothing to show.
       }
       if (!live) return;
-      if (!current && attempt < 4) timer = setTimeout(() => void ask(attempt + 1), 600 * (attempt + 1));
+      if (stale && attempt < 4) timer = setTimeout(() => void ask(attempt + 1), 600 * (attempt + 1));
       else setState(answer);
     };
     timer = setTimeout(() => void ask(0), 250);

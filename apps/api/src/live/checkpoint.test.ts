@@ -83,6 +83,21 @@ describe('checkpoints', () => {
     });
   });
 
+  it('refuses a body that is not a JSON object and the other format on a live export', async () => {
+    await withStorage(async (storage) => {
+      const app = createApp({ storage, notifier: new NoopNotifier() });
+      const { documentId } = await publish(storage, { content: SOURCE, format: 'markdown' });
+      const bad = await app.request(`/api/documents/${documentId}/checkpoints`, {
+        method: 'POST',
+        headers: { ...CSRF_HEADERS, 'content-type': 'application/json' },
+        body: 'null',
+      });
+      expect(bad.status).toBe(400);
+      expect((await app.request(`/api/documents/${documentId}/export?format=text`)).status).toBe(400);
+      expect((await app.request(`/api/documents/${documentId}/export?format=markdown`)).status).toBe(200);
+    });
+  });
+
   it('restore is a new edit that keeps later history', async () => {
     await withStorage(async (storage) => {
       const app = createApp({ storage, notifier: new NoopNotifier() });

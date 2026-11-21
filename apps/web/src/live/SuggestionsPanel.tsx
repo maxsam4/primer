@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import diff from 'fast-diff';
-import type { SuggestedEditDTO, SuggestionDTO, SuggestionsResponse } from '@polygonlabs/primer-api-types';
+import type { Reconciliation, SuggestedEditDTO, SuggestionDTO, SuggestionsResponse } from '@polygonlabs/primer-api-types';
 import { api } from '../lib/fetch.ts';
 import { useThreadEvents } from './threadEvents.ts';
 import { t, type MessageKey } from '../i18n/index.ts';
@@ -23,6 +23,8 @@ export function SuggestionsPanel(props: {
   const { documentId, tabId, onCount } = props;
   const [suggestions, setSuggestions] = useState<SuggestionDTO[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Change sets count every open suggestion of the document: a bulk decision acts on all of them, not this tab's.
+  const [sets, setSets] = useState<Map<string, number>>(new Map());
 
   const refresh = useCallback(async () => {
     const res = await api(`/api/documents/${encodeURIComponent(documentId)}/suggestions`).catch(() => null);
@@ -30,6 +32,9 @@ export function SuggestionsPanel(props: {
     const body = (await res.json()) as SuggestionsResponse;
     const open = body.suggestions.filter((s) => s.status === 'open' && s.edits.some((e) => e.target.tabId === tabId));
     setSuggestions(open);
+    const counts = new Map<string, number>();
+    for (const s of body.suggestions) if (s.status === 'open' && s.changeSetId && !s.conflict) counts.set(s.changeSetId, (counts.get(s.changeSetId) ?? 0) + 1);
+    setSets(counts);
     onCount?.(open.length);
   }, [documentId, tabId, onCount]);
 
@@ -56,13 +61,15 @@ export function SuggestionsPanel(props: {
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { refusal?: { message: string; fix: string } } | null;
       setError(body?.refusal ? `${body.refusal.message} ${body.refusal.fix}` : t(decision === 'accept' ? 'suggestions.acceptFailed' : 'suggestions.rejectFailed', { status: res.status }));
+    } else if (decision === 'accept') {
+      // A 200 can still leave suggestions open (a block changed since): say which.
+      const left = ((await res.json().catch(() => null)) as Reconciliation | null)?.outcomes.filter((o) => o.status !== 'applied' && o.status !== 'unchanged') ?? [];
+      if (left.length > 0) setError(t('suggestions.leftOpen', { count: left.length, reason: left[0]!.refusal ? `${left[0]!.refusal.message} ${left[0]!.refusal.fix}` : '' }));
     }
     await refresh();
   };
-  const sets = new Map<string, number>();
-  for (const s of suggestions) if (s.changeSetId && !s.conflict) sets.set(s.changeSetId, (sets.get(s.changeSetId) ?? 0) + 1);
 
-  if (suggestions.length === 0) return <p className="p-2 text-xs text-neutral-500">{t('suggestions.none')}</p>;
+  if (suggestions.length === 0 && sets.size === 0) return <p className="p-2 text-xs text-neutral-500">{t('suggestions.none')}</p>;
   return (
     <div className="flex flex-col gap-2" data-suggestions-panel>
       {error && <p className="rounded bg-red-50 p-2 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">{error}</p>}

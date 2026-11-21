@@ -103,26 +103,30 @@ async function insertRun(documentId: string, agentId: string, requestedBy: strin
     .update(`${request.kind}\n${request.threadId ?? request.blockId ?? ''}\n${request.prompt}`)
     .digest('hex');
   const id = await transactionWithEvents(async (tx, emit) => {
-    const inserted = (await tx.execute(sql`
-      INSERT INTO agent_runs (id, document_id, agent_id, requested_by, status, request, dedupe_key)
-      VALUES (${uuidv7()}, ${documentId}, ${agentId}, ${requestedBy}, 'queued', ${JSON.stringify(request)}::jsonb, ${dedupeKey})
-      ON CONFLICT (document_id, agent_id, dedupe_key) WHERE status in ('queued', 'running') DO NOTHING
-      RETURNING id
-    `)) as unknown as { id: string }[];
-    if (inserted[0]) {
-      emit({
-        documentId,
-        actorId: requestedBy,
-        type: 'run.requested',
-        payload: { document_id: documentId, run_id: inserted[0].id, agent_id: agentId },
-      });
-      return inserted[0].id;
+    // The conflicting active run can finish between the INSERT and the
+    // SELECT: then there is nothing to return, so insert again.
+    for (;;) {
+      const inserted = (await tx.execute(sql`
+        INSERT INTO agent_runs (id, document_id, agent_id, requested_by, status, request, dedupe_key)
+        VALUES (${uuidv7()}, ${documentId}, ${agentId}, ${requestedBy}, 'queued', ${JSON.stringify(request)}::jsonb, ${dedupeKey})
+        ON CONFLICT (document_id, agent_id, dedupe_key) WHERE status in ('queued', 'running') DO NOTHING
+        RETURNING id
+      `)) as unknown as { id: string }[];
+      if (inserted[0]) {
+        emit({
+          documentId,
+          actorId: requestedBy,
+          type: 'run.requested',
+          payload: { document_id: documentId, run_id: inserted[0].id, agent_id: agentId },
+        });
+        return inserted[0].id;
+      }
+      const [existing] = (await tx.execute(sql`
+        SELECT id FROM agent_runs
+         WHERE document_id = ${documentId} AND agent_id = ${agentId} AND dedupe_key = ${dedupeKey} AND status in ('queued', 'running')
+      `)) as unknown as { id: string }[];
+      if (existing) return existing.id;
     }
-    const [existing] = (await tx.execute(sql`
-      SELECT id FROM agent_runs
-       WHERE document_id = ${documentId} AND agent_id = ${agentId} AND dedupe_key = ${dedupeKey} AND status in ('queued', 'running')
-    `)) as unknown as { id: string }[];
-    return existing!.id;
   });
   return (await loadRun(id))!;
 }
@@ -202,9 +206,21 @@ async function agentRun(agent: AuthUser, runId: string): Promise<RunRow | RunRes
   return run;
 }
 
+/** Clears the agent's awareness on a document once none of its runs is
+ *  active there (a finished run must not wipe another run's status). */
+async function clearAwarenessIfIdle(documentId: string, agentId: string): Promise<void> {
+  const [{ n }] = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM agent_runs
+     WHERE document_id = ${documentId} AND agent_id = ${agentId} AND status IN ('queued', 'running')
+  `)) as unknown as { n: number }[];
+  if (n === 0) await setAgentAwareness(documentId, { id: agentId } as AuthUser, null);
+}
+
 export async function claimRun(agent: AuthUser, runId: string): Promise<RunResult<AgentRunDTO>> {
   const run = await agentRun(agent, runId);
   if ('ok' in run) return run;
+  // The awareness line shows in the document: only an agent that can read it may set one.
+  if (!(await readableLiveDoc(run.documentId, agent))) return runNotFound();
   const out = await transition(run, agent, { from: ['queued'], set: sql`status = 'running', started_at = now()` });
   if (out.ok) await setAgentAwareness(run.documentId, agent, { status: 'Working…', cursorBlockId: null });
   return out;
@@ -218,6 +234,7 @@ export async function updateRunStatus(
 ): Promise<RunResult<AgentRunDTO>> {
   const run = await agentRun(agent, runId);
   if ('ok' in run) return run;
+  if (!(await readableLiveDoc(run.documentId, agent))) return runNotFound();
   const statusLine = typeof body.statusLine === 'string' ? body.statusLine.slice(0, 200) : null;
   const plan = typeof body.plan === 'string' && body.plan.trim() ? body.plan.slice(0, 10_000) : null;
   if (statusLine === null && plan === null) return fail(400, 'bad_request', 'Send statusLine or plan.', 'Send { statusLine } or { plan }.');
@@ -241,7 +258,7 @@ export async function finishRun(agent: AuthUser, runId: string, body: { error?: 
     ? sql`status = 'failed', error = ${error}, finished_at = now()`
     : sql`status = 'done', finished_at = now()`;
   const out = await transition(run, agent, { from: ACTIVE, set });
-  if (out.ok) await setAgentAwareness(run.documentId, agent, null);
+  if (out.ok) await clearAwarenessIfIdle(run.documentId, agent.id);
   return out;
 }
 
@@ -261,7 +278,7 @@ export async function cancelRun(user: AuthUser, runId: string): Promise<RunResul
   const run = await steerable(user, runId);
   if ('ok' in run) return run;
   const out = await transition(run, user, { from: ACTIVE, set: sql`status = 'cancelled', finished_at = now()` });
-  if (out.ok) await setAgentAwareness(run.documentId, { id: run.agentId } as AuthUser, null);
+  if (out.ok) await clearAwarenessIfIdle(run.documentId, run.agentId);
   return out;
 }
 
@@ -372,7 +389,7 @@ export async function runHooks(documentId: string, actor: AuthUser, runId: strin
         details: { editsApplied: now.editsApplied, blocksRemoved: now.blocksRemoved },
       };
     },
-    afterPersist: async ({ inverses }: { inverses: BlockInverse[] }) => {
+    beforeWrite: async ({ inverses }: { inverses: BlockInverse[] }) => {
       if (inverses.length === 0) return;
       await db.insert(runInverses).values(
         inverses.map((inv) => ({
@@ -381,7 +398,8 @@ export async function runHooks(documentId: string, actor: AuthUser, runId: strin
           target: inv.target as unknown as Record<string, unknown>,
           prior: inv.prior,
           afterVersion: inv.afterVersion,
-          place: inv.place as unknown as Record<string, unknown> | null,
+          // A moved block's post-run place rides along as `after` (undo checks it).
+          place: (inv.afterPlace ? { ...inv.place, after: inv.afterPlace } : inv.place) as unknown as Record<string, unknown> | null,
         })),
       );
     },

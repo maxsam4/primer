@@ -488,6 +488,7 @@ describe('PrimerClient.records', () => {
     expect(init.method).toBe('POST');
     expect(err).toBeInstanceOf(PrimerApiError);
     expect((err as PrimerApiError).code).toBe('record_conflict');
-    expect((err as PrimerApiError).message).toContain('Read the record again.');
+    expect((err as PrimerApiError).message).toContain('Record "r" is at version 2');
+    expect((err as PrimerApiError).refusal).toEqual({ code: 'record_conflict', fix: 'Read the record again.' });
   });
 });

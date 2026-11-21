@@ -487,8 +487,9 @@ describe('page text messages', () => {
       embeds: [{ embedId: 'scores', rect: { x: 0, y: 10, width: 100, height: 40 } }],
     };
     expect(parseInboundMessage(ok)).toEqual(ok);
-    expect(parseInboundMessage({ ...ok, elements: [{ pid: 'p1', text: 'x', rect: { x: 1, y: 2, width: 'wide', height: 4 } }] })).toBeNull();
-    expect(parseInboundMessage({ ...ok, elements: [{ pid: 'p 1', text: 'x', rect: { x: 1, y: 2, width: 3, height: 4 } }] })).toBeNull();
+    // A malformed element is dropped (read-only), not the whole report.
+    expect(parseInboundMessage({ ...ok, elements: [{ pid: 'p1', text: 'x', rect: { x: 1, y: 2, width: 'wide', height: 4 } }] })).toEqual({ ...ok, elements: [] });
+    expect(parseInboundMessage({ ...ok, elements: [...ok.elements, { pid: 'p 1', text: 'x', rect: { x: 1, y: 2, width: 3, height: 4 } }] })).toEqual(ok);
     expect(parseInboundMessage({ type: 'page_rects', rects: { p1: { x: 0, y: 0, width: 1, height: 1 } }, embedRects: {} })).toEqual({
       type: 'page_rects',
       rects: { p1: { x: 0, y: 0, width: 1, height: 1 } },

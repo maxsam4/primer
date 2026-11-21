@@ -51,6 +51,7 @@ function makeHarness(initialRows: EventRowDTO[], pageSize = 2) {
     onopen: EventSourceLike['onopen'] = null;
     onerror: EventSourceLike['onerror'] = null;
     closed = false;
+    readyState?: number;
     constructor(public url: string) {
       sources.push(this);
     }
@@ -167,6 +168,27 @@ describe('createEventsFeed', () => {
     expect(h.batches.flat().map((r) => r.id)).toEqual([20, 21, 22]);
     const reconnectCalls = h.state.listCalls.slice(1); // [0] is the initial hydrate
     expect(reconnectCalls[0]).toContain('since=21');
+  });
+
+  it('recreates the stream from the highest id seen when the browser gives up on it', async () => {
+    const h = makeHarness([row(40), row(41)]);
+    await h.feed.start();
+    const first = h.sources[0];
+    first.readyState = 2; // CLOSED: a non-200 reply, no native reconnect
+    first.onerror?.({});
+    expect(first.closed).toBe(true);
+    expect(h.sources).toHaveLength(1);
+    h.flushTimers(); // the backoff timer
+    expect(h.sources).toHaveLength(2);
+    expect(h.sources[1].url).toContain('/events/stream?since=41');
+  });
+
+  it('a visibility-regain refresh also reads rows below the highest id seen', async () => {
+    const h = makeHarness([row(50, { audience: 'readers' }), row(60)]);
+    await h.feed.start();
+    h.state.rows.push(row(55)); // became readable after an access change
+    await h.feed.refresh();
+    expect(h.batches.flat().map((r) => r.id)).toEqual([60, 55]);
   });
 
   it('refresh() (visibility regain) re-reads without a connection error', async () => {

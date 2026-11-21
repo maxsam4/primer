@@ -34,6 +34,20 @@ describe('blockVersion', () => {
     expect(version(tr.doc, 'child')).toBe(version(before, 'child'));
     expect(version(tr.doc, 'parent')).toBe(version(before, 'parent'));
   });
+
+  it('a comment on part of a run does not change the version', () => {
+    const editor = serverEditor();
+    const doc = editor._blocksToProsemirrorNode([{ id: 'b', type: 'paragraph', content: 'Hello brave world' }]);
+    const block = findBlock(doc, 'b')!;
+    const from = block.pos + 2 + 'Hello '.length;
+    const tr = new Transform(doc).addMark(
+      from,
+      from + 'brave'.length,
+      editor.editor.pmSchema.marks.comment!.create({ threadId: 't1' }),
+    );
+    expect(tr.doc.toJSON()).not.toEqual(doc.toJSON());
+    expect(blockVersion(findBlock(tr.doc, 'b')!.node)).toBe(blockVersion(block.node));
+  });
 });
 
 describe('layout blocks', () => {

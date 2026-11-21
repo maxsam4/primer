@@ -52,6 +52,7 @@ export function AddVersionModal({ open, preselectedDocId, preselectedDocTitle, o
       setVersionNote('');
       setQuery('');
       setError(null);
+      setSuggested(null);
     } else {
       triggerSelector.current?.focus();
     }

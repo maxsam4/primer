@@ -13,7 +13,8 @@ Shared records: per-document storage for pages and agents, like Claude Artifacts
   Verbs get, list, query, set, update (shallow merge), delete and batch (all
   or nothing) over REST (`POST /api/documents/:docId/records/<verb>`), MCP
   (`primer_read_records`, `primer_write_records`) and the page bridge. Writes
-  take `expectVersion` and are refused with `record_conflict` when stale.
+  return the merged record, so `records:write` also reveals the records it
+  touches. Writes take `expectVersion` and are refused with `record_conflict` when stale.
   Owners, editors and responders write. Records are never tied to page
   versions.
 - **Change log, revert, purge.** Every write is logged with before and after
@@ -31,8 +32,9 @@ Shared records: per-document storage for pages and agents, like Claude Artifacts
   itself contributed to gets `untrusted: true`; merges and reverts keep the
   mark.
 - **data.changed.** Shared writes produce one coalesced `primer.data.changed`
-  event per (document, writer) about 2 s after a burst. No reader is ever
-  handed the `data.changed` its own writes caused.
+  event per (document, writer) about 2 s after a burst. An agent is never
+  handed the `data.changed` its own writes caused; a person is, so a second
+  tab of the same person still refreshes.
 - **Pages.** A page with `<meta name="primer-records" content="read">` is
   served with the `records` outbound policy (nothing remote), gets no
   `open_external`, and gets `window.primer.records` bound by the host to its

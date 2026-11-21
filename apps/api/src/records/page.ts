@@ -7,9 +7,14 @@ import { RECORD_COLLECTION_RE, type PagePolicy, type RecordsSnapshot } from '@po
 // decision to bind records to it always come from the same bytes.
 const META_RE = /<meta\b[^>]*>/gi;
 
-export function readsRecords(html: string): boolean {
+/** The page's <head> as markup that counts: comments and script/style bodies, which can hold meta-looking text, are cut out. */
+function headOf(html: string): string {
   const end = html.search(/<\/head\s*>/i);
-  const head = end === -1 ? html : html.slice(0, end);
+  return (end === -1 ? html : html.slice(0, end)).replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/<(script|style)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, '');
+}
+
+export function readsRecords(html: string): boolean {
+  const head = headOf(html);
   for (const tag of head.match(META_RE) ?? []) {
     const name = /\bname\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1];
     const content = /\bcontent\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1];
@@ -32,8 +37,7 @@ export const FROZEN_RECORDS_ID = 'primer-records-frozen';
  * aren't valid collection names are ignored.
  */
 export function declaredCollections(html: string): string[] {
-  const end = html.search(/<\/head\s*>/i);
-  const head = end === -1 ? html : html.slice(0, end);
+  const head = headOf(html);
   const out = new Set<string>();
   for (const tag of head.match(META_RE) ?? []) {
     const name = /\bname\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1];

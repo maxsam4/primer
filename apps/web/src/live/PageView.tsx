@@ -17,6 +17,10 @@ export type PageViewContext = {
   canEdit: boolean;
   theme: 'light' | 'dark';
   viewer: StoreViewer & { name: string };
+  /** The document route's handlers for what a frame asks of the host (links
+   *  out, event submissions) and its sender registration (their acks). */
+  onArtifactMessage?: (msg: InboundProtocolMessage) => void;
+  registerArtifactSender?: (send: ((msg: OutboundProtocolMessage) => void) | null) => void;
 };
 
 type Open = { target: Target; kind: 'text' | 'blocks' };
@@ -31,8 +35,8 @@ type Open = { target: Target; kind: 'text' | 'blocks' };
  * those fragments change. A pid whose reported text isn't its source text was
  * drawn by a script and is read-only.
  */
-export function PageView(props: PageViewContext & { blockId: string; title: string }) {
-  const { doc, documentId, tabId, blockId } = props;
+export function PageView(props: PageViewContext & { blockId: string; title: string; sourceKey: string }) {
+  const { doc, documentId, tabId, blockId, sourceKey } = props;
   const src = `/api/documents/${documentId}/pages/${blockId}/content`;
   const [info, setInfo] = useState<LivePageInfo | null>(null);
   const [reported, setReported] = useState<{ pid: string; text: string }[] | null>(null);
@@ -42,15 +46,17 @@ export function PageView(props: PageViewContext & { blockId: string; title: stri
   const frame = useRef<HTMLIFrameElement | null>(null);
   const post = useRef<((msg: OutboundProtocolMessage) => void) | null>(null);
 
+  // A republish switches the block's source: read the new page's texts and frame again.
   useEffect(() => {
     let live = true;
+    setReported(null);
     void api(`/api/documents/${documentId}/pages/${blockId}`).then(async (res) => {
       if (live && res.ok) setInfo((await res.json()) as LivePageInfo);
     });
     return () => {
       live = false;
     };
-  }, [documentId, blockId]);
+  }, [documentId, blockId, sourceKey]);
 
   // The overlay follows the frame when the host scrolls or resizes.
   const [, setLayout] = useState(0);
@@ -153,10 +159,15 @@ export function PageView(props: PageViewContext & { blockId: string; title: stri
   return (
     <div className="primer-page w-full" data-primer-page={blockId} contentEditable={false} style={{ height: '70vh' }}>
       <ArtifactIframe
+        key={sourceKey}
         src={src}
         anchors={[]}
         theme={props.theme}
-        onMessage={() => undefined}
+        // Only what a page asks of the host: its comments live in the overlay editor.
+        onMessage={(msg) => {
+          if (msg.type === 'open_external' || msg.type === 'submit_events') props.onArtifactMessage?.(msg);
+        }}
+        registerSender={props.registerArtifactSender}
         page={page}
         frameRef={(el) => {
           frame.current = el;

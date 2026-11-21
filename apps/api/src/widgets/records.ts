@@ -5,9 +5,11 @@ import { widgets } from '../db/schema.ts';
 import { withLiveDocument } from '../live/instance.ts';
 import { SYSTEM_ORIGIN } from '../live/origin.ts';
 import { applyPlan } from '../live/pipeline.ts';
+import { docQueue } from '../live/queue.ts';
 import { MAIN_TAB } from '../live/reach.ts';
 import { logger } from '../logger.ts';
-import { tabOfBlock } from './labels.ts';
+import { carryEdit, tabOfBlock } from './labels.ts';
+import { labelsOf } from './serialize.ts';
 import { MAX_ROWS, renderBoth, widgetIdPrefix, type WidgetRow } from './render.ts';
 
 /**
@@ -33,8 +35,14 @@ export async function collectionRows(documentId: string, collection: string): Pr
  * records (after a coalesced `data.changed`), keeping the published source.
  * A render that fails leaves the last good publish live.
  */
-export async function refreshBoundWidgets(documentId: string, collections: string[]): Promise<void> {
-  if (collections.length === 0) return;
+export function refreshBoundWidgets(documentId: string, collections: string[]): Promise<void> {
+  if (collections.length === 0) return Promise.resolve();
+  // One refresh at a time per document: two (one per actor's window) must not
+  // render from different snapshots and have the newer discarded.
+  return docQueue(`widgets:${documentId}`)(() => refresh(documentId, collections));
+}
+
+async function refresh(documentId: string, collections: string[]): Promise<void> {
   const bound = await db
     .select()
     .from(widgets)
@@ -58,16 +66,21 @@ export async function refreshBoundWidgets(documentId: string, collections: strin
       .returning({ id: widgets.id });
     if (updated.length === 0) continue; // a publish landed meanwhile
     const tabId = (await withLiveDocument(documentId, (doc) => tabOfBlock(doc, widget.blockId))) ?? MAIN_TAB;
+    // The redraw may draw other labels (a no-data note): their fragments and
+    // the block's text ids follow, with people's edits to kept labels carried.
+    const theirs = rendered.light.labels;
+    const base = widget.publishedSvgLight ? labelsOf(widget.publishedSvgLight) : {};
     await applyPlan(documentId, SYSTEM_ORIGIN, {
       onConflict: 'refuse',
       edits: [
+        ...Object.entries(theirs).map(([textId, agentText]) => carryEdit({ tabId, blockId: widget.blockId, textId }, base[textId], agentText)),
         {
           target: { tabId, blockId: widget.blockId },
           inverse: false,
           build: (tr, at) => {
             if (!at) return;
             const content = at.node.firstChild!;
-            tr.setNodeMarkup(at.pos + 1, undefined, { ...content.attrs, hash: rendered.hash });
+            tr.setNodeMarkup(at.pos + 1, undefined, { ...content.attrs, hash: rendered.hash, textIds: Object.keys(theirs).join(' ') });
           },
         },
       ],

@@ -183,6 +183,18 @@ describe('applyOps', () => {
     expect(await markdownOf(id, agent)).toEqual(['Keep this, edited']);
   });
 
+  it('a json type change without content keeps the block text', async () => {
+    const agent = await makeAgent();
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha text')]);
+    const v = await versions(id, agent);
+
+    const result = await ops(id, agent, { ops: [{ op: 'update', target: main('a'), block: { json: { type: 'heading' } }, expectVersion: v.a }] });
+
+    expect(result.outcomes[0]!.status).toBe('applied');
+    expect(await markdownOf(id, agent)).toEqual(['# Alpha text']);
+  });
+
   it('markdown list input becomes one block per item', async () => {
     const agent = await makeAgent();
     const id = await createLiveDoc();

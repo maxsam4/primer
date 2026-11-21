@@ -4,12 +4,12 @@ import type { Reconciliation, Refusal } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { similarity, similarityCost } from '../lib/similarity.ts';
 import { markdownTokenizer as md } from '../upload/markdown.ts';
-import { findBlock } from './blocks.ts';
+import { blockIndex, findBlock } from './blocks.ts';
 import { serverEditor } from './editor.ts';
 import type { ImportResult } from './import.ts';
 import { liveDocName, liveInstance } from './instance.ts';
 import { originFor, SYSTEM_ORIGIN } from './origin.ts';
-import { applyPlan, type PlannedEdit } from './pipeline.ts';
+import { applyPlan, longestIncreasing, type PlannedEdit } from './pipeline.ts';
 import { MAIN_TAB, tabFragmentName } from './reach.ts';
 import { groupVersion, pmDocOf, rewriteSources, trustedMeta, trustedSources, type SourceEntry } from './sources.ts';
 
@@ -55,13 +55,24 @@ export async function mergeRepublish(documentId: string, actor: AuthUser, theirs
   const { pairs, identityOnly } = align(base, their);
 
   const edits: PlannedEdit[] = [];
-  const kinds: ({ kind: 'changed'; j: number; i: number } | { kind: 'new'; j: number } | { kind: 'removed'; i: number })[] = [];
+  const kinds: ({ kind: 'changed'; j: number; i: number } | { kind: 'moved'; j: number; i: number } | { kind: 'new'; j: number } | { kind: 'removed'; i: number })[] = [];
   const alignedBase = new Set(pairs.keys());
 
   const theirToBase = new Map([...pairs].map(([i, p]) => [p.j, { i, same: p.same }]));
+  // Identical groups are matched without regard to order: the ones outside
+  // the longest run that kept its order were moved in the new file.
+  const ordered = [...pairs].sort(([x], [y]) => x - y);
+  const keep = longestIncreasing(ordered.map(([, p]) => p.j));
+  const reordered = new Set(ordered.filter(([, p], k) => p.same && !keep.has(k)).map(([i]) => i));
   their.forEach((group, j) => {
     const aligned = theirToBase.get(j);
-    if (aligned?.same) return;
+    if (aligned?.same) {
+      if (reordered.has(aligned.i)) {
+        kinds.push({ kind: 'moved', j, i: aligned.i });
+        edits.push(moveEdit(base[aligned.i]!, anchorsBefore(j, their, theirToBase, base)));
+      }
+      return;
+    }
     if (aligned) {
       kinds.push({ kind: 'changed', j, i: aligned.i });
       edits.push(replaceEdit(base[aligned.i]!, group));
@@ -86,13 +97,14 @@ export async function mergeRepublish(documentId: string, actor: AuthUser, theirs
     alsoWrite: (doc, outcomes, suggesting) => {
       if (suggesting) return;
       const applied = new Set(outcomes.filter((o) => o.status === 'applied').map((o) => o.index));
-      const final = pmDocOf(doc.getXmlFragment(tabFragmentName(MAIN_TAB)));
+      const final = blockIndex(pmDocOf(doc.getXmlFragment(tabFragmentName(MAIN_TAB))));
       const entries = new Map<string, SourceEntry>();
       const removed = new Set<number>();
       const replaced = new Set<number>();
       kinds.forEach((k, index) => {
         if (!applied.has(index)) return;
         if (k.kind === 'removed') removed.add(k.i);
+        else if (k.kind === 'moved') return;
         else {
           if (k.kind === 'changed') replaced.add(k.i);
           put(entries, final, their[k.j]!.entry);
@@ -106,7 +118,16 @@ export async function mergeRepublish(documentId: string, actor: AuthUser, theirs
           put(entries, final, { ...their[pair.j]!.entry, groupIds: group.entry.groupIds });
         } else entries.set(group.key, group.entry);
       });
-      rewriteSources(doc, documentId, entries, { format: trustedMeta(doc, documentId).format, frontMatter: theirs.frontMatter, lead: theirs.lead });
+      const meta = { format: trustedMeta(doc, documentId).format, frontMatter: theirs.frontMatter, lead: theirs.lead };
+      // An identical republish rewrites nothing (and so stores no update).
+      const now = trustedSources(doc, documentId);
+      const was = trustedMeta(doc, documentId);
+      const unchanged =
+        entries.size === now.size &&
+        [...entries].every(([key, entry]) => now.has(key) && sameEntry(now.get(key)!, entry)) &&
+        was.frontMatter === meta.frontMatter &&
+        was.lead === meta.lead;
+      if (!unchanged) rewriteSources(doc, documentId, entries, meta);
     },
   });
   if (!identityOnly) return result;
@@ -117,9 +138,20 @@ export async function mergeRepublish(documentId: string, actor: AuthUser, theirs
   return { ...result, outcomes };
 }
 
+function sameEntry(a: SourceEntry, b: SourceEntry): boolean {
+  return (
+    a.slice === b.slice &&
+    a.gap === b.gap &&
+    a.version === b.version &&
+    a.groupIds.join() === b.groupIds.join() &&
+    a.refs.join() === b.refs.join() &&
+    a.defines.join() === b.defines.join()
+  );
+}
+
 /** Adds `entry` keyed by its first block, with the version of the blocks as
  *  they are now (skipped when one is gone). */
-function put(entries: Map<string, SourceEntry>, final: PmNode, entry: SourceEntry) {
+function put(entries: Map<string, SourceEntry>, final: Map<string, PmNode>, entry: SourceEntry) {
   const version = groupVersion(final, entry.groupIds);
   if (version !== null) entries.set(entry.groupIds[0]!, { ...entry, version });
 }
@@ -227,13 +259,19 @@ export function align(
     usedBase.add(c.i);
     usedTheirs.add(c.j);
   }
+  // A reference-style link reads its target from a definition elsewhere: with
+  // the same slice but a changed definition, the group is not unchanged.
+  const definition = (groups: { entry: SourceEntry }[], label: string) => groups.find((g) => g.entry.defines.includes(label))?.entry.slice;
+  for (const [i, pair] of pairs) {
+    if (pair.same && base[i]!.entry.refs.some((label) => definition(base, label) !== definition(their, label))) pair.same = false;
+  }
   return { pairs, identityOnly };
 }
 
 /** The group's blocks are all there, siblings in order, and unchanged since
  *  import. */
 function untouched(doc: PmNode, entry: SourceEntry): boolean {
-  if (groupVersion(doc, entry.groupIds) !== entry.version) return false;
+  if (groupVersion(blockIndex(doc), entry.groupIds) !== entry.version) return false;
   const first = findBlock(doc, entry.groupIds[0]!)!;
   const $first = doc.resolve(first.pos);
   const index = $first.index();
@@ -244,6 +282,27 @@ function changed(entry: SourceEntry): Refusal {
   return {
     code: 'target_changed',
     message: `Block ${entry.groupIds[0]} was edited since it was published; the new text was suggested instead.`,
+    fix: 'Decide the suggestion.',
+    details: { blockId: entry.groupIds[0] },
+  };
+}
+
+/** Any of the blocks carries a comment mark. */
+function commented(doc: PmNode, ids: string[]): boolean {
+  return ids.some((id) => {
+    let found = false;
+    findBlock(doc, id)?.node.descendants((node) => {
+      if (node.marks.some((m) => m.type.name === 'comment')) found = true;
+      return !found;
+    });
+    return found;
+  });
+}
+
+function commentedRefusal(entry: SourceEntry): Refusal {
+  return {
+    code: 'target_changed',
+    message: `Block ${entry.groupIds[0]} has comments on it; the new text was suggested instead so they are not lost.`,
     fix: 'Decide the suggestion.',
     details: { blockId: entry.groupIds[0] },
   };
@@ -261,6 +320,7 @@ function removeEdit(group: BaseGroup): PlannedEdit {
   return {
     target: { tabId: MAIN_TAB, blockId: group.entry.groupIds[0]! },
     inverse: false,
+    source: { drop: group.key },
     // An edited group the new file dropped stays as it is.
     build: (tr) => {
       if (!untouched(tr.doc, group.entry)) return;
@@ -277,9 +337,12 @@ function replaceEdit(group: BaseGroup, their: TheirGroup): PlannedEdit {
   return {
     target: { tabId: MAIN_TAB, blockId: firstId },
     inverse: false,
+    source: { entry: their.entry },
     build: (tr, _at, ctx) => {
       if (!untouched(tr.doc, group.entry) && !ctx.suggesting) return changed(group.entry);
       if (!findBlock(tr.doc, firstId)) return changed(group.entry);
+      // Replacing swaps in fresh blocks, which would drop comments on the old ones.
+      if (!ctx.suggesting && commented(tr.doc, group.entry.groupIds)) return commentedRefusal(group.entry);
       removeGroup(tr, group.entry.groupIds.slice(1));
       const first = findBlock(tr.doc, firstId)!;
       tr.replaceWith(first.pos, first.pos + first.node.nodeSize, Fragment.fromArray(nodes));
@@ -299,16 +362,48 @@ function anchorsBefore(j: number, their: TheirGroup[], theirToBase: Map<number, 
   return out;
 }
 
+/** The first anchor that is a top-level block (other than `skip`), or null. */
+function topLevelAnchor(doc: PmNode, anchors: string[], skip: string[] = []): { pos: number; node: PmNode } | null {
+  for (const id of anchors) {
+    if (skip.includes(id)) continue;
+    const found = findBlock(doc, id);
+    if (found && doc.resolve(found.pos).depth === 1) return found;
+  }
+  return null;
+}
+
 function insertEdit(group: TheirGroup, anchors: string[]): PlannedEdit {
   return {
     target: { tabId: MAIN_TAB, blockId: group.entry.groupIds[0]! },
     inverse: false,
+    source: { entry: group.entry },
     build: (tr) => {
       // New groups go between top-level blocks: after the nearest top-level
       // anchor, else first.
-      const anchor = anchors.map((id) => findBlock(tr.doc, id)).find((found) => found !== null && tr.doc.resolve(found.pos).depth === 1);
+      const anchor = topLevelAnchor(tr.doc, anchors);
       const pos = anchor ? anchor.pos + anchor.node.nodeSize : 1;
       tr.insert(pos, Fragment.fromArray(group.nodes));
+    },
+  };
+}
+
+/** An unchanged group the new file placed elsewhere: moved after the group
+ *  that now precedes it (an edited one stays where it is). */
+function moveEdit(group: BaseGroup, anchors: string[]): PlannedEdit {
+  const ids = group.entry.groupIds;
+  return {
+    target: { tabId: MAIN_TAB, blockId: ids[0]! },
+    inverse: false,
+    build: (tr, _at, ctx) => {
+      if (!untouched(tr.doc, group.entry)) return;
+      const first = findBlock(tr.doc, ids[0]!)!;
+      const anchor = topLevelAnchor(tr.doc, anchors, ids);
+      if (anchor ? anchor.pos + anchor.node.nodeSize === first.pos : first.pos === 1) return;
+      const nodes = ids.map((id) => findBlock(tr.doc, id)!.node);
+      removeGroup(tr, ids);
+      const now = topLevelAnchor(tr.doc, anchors, ids);
+      tr.insert(now ? now.pos + now.node.nodeSize : 1, Fragment.fromArray(nodes));
+      for (const id of ids) ctx.moved(id);
     },
   };
 }

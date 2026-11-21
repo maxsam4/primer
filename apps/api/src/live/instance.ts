@@ -57,6 +57,16 @@ export function onLiveUpdate(handler: UpdateHandler): () => void {
   return () => updateHandlers.delete(handler);
 }
 
+const loadHandlers = new Set<(documentId: string) => void>();
+
+/** Runs when a live document has been loaded into memory (indexes kept from
+ *  the document, such as tasks, catch up with what changed while it was
+ *  unloaded). Must not wait on the document itself. */
+export function onLiveLoad(handler: (documentId: string) => void): () => void {
+  loadHandlers.add(handler);
+  return () => loadHandlers.delete(handler);
+}
+
 let instance: Hocuspocus | null = null;
 
 /**
@@ -72,9 +82,12 @@ export function liveInstance(): Hocuspocus {
     // WebSocket peers only (live/hub.ts resolved `auth` at the upgrade); server
     // writes open direct connections, which skip this hook.
     async onAuthenticate({ context, documentName, connectionConfig }) {
-      const auth = (context as LiveContext).auth;
+      const { auth: opened, reauth } = context as LiveContext;
       const documentId = documentIdOf(documentName);
-      if (!auth || !documentId) throw new Error('forbidden');
+      if (!opened || !documentId) throw new Error('forbidden');
+      // The upgrade's auth may be stale: a token revoked since then must not join.
+      const auth = reauth ? await reauth() : opened;
+      if (!auth) throw new Error('forbidden');
       const access = await liveAccess(auth, documentId);
       if (access === 'none') throw new Error('forbidden');
       connectionConfig.readOnly = access !== 'write';
@@ -106,6 +119,7 @@ export function liveInstance(): Hocuspocus {
         for (const handler of updateHandlers) handler(documentId, by, touched);
       };
       document.on('update', onUpdate);
+      for (const handler of loadHandlers) handler(documentId);
       // Detach only once the document is really gone: Hocuspocus keeps it
       // after beforeUnloadDocument when someone connected meanwhile.
       document.on('destroy', () => {

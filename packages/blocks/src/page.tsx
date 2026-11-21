@@ -27,13 +27,13 @@ export const pageBlock = createReactBlockSpec(
     content: 'none',
   },
   {
-    render: ({ block }) => <PageBlockView blockId={block.id} title={block.props.title} />,
+    render: ({ block }) => <PageBlockView blockId={block.id} title={block.props.title} sourceKey={block.props.sourceKey} />,
   },
 );
 
-function PageBlockView({ blockId, title }: { blockId: string; title: string }) {
+function PageBlockView({ blockId, title, sourceKey }: { blockId: string; title: string; sourceKey: string }) {
   const PageView = usePrimerBlockServices()?.PageView;
-  if (PageView) return <PageView blockId={blockId} title={title} />;
+  if (PageView) return <PageView blockId={blockId} title={title} sourceKey={sourceKey} />;
   return (
     <div className="primer-page" data-primer-page={blockId}>
       {title}

@@ -65,7 +65,7 @@ export type PrimerBlockServices = {
   /** The blocks' strings in the viewer's locale. */
   text: BlockText;
   /** Renders a page block's frame and overlay (the web editor). */
-  PageView?: ComponentType<{ blockId: string; title: string }>;
+  PageView?: ComponentType<{ blockId: string; title: string; sourceKey: string }>;
   /** Renders a widget block's SVG, label editing and comments (the web editor). */
   WidgetView?: ComponentType<{ blockId: string; props: { widgetId: string; hash: string; textIds: string } }>;
   /** Renders a data-table block's rows, cell editing and row comments (the web editor). */

@@ -85,7 +85,9 @@ function emit(text: string, ast: AstNode): string {
   const edits: { start: number; end: number; code: string }[] = [];
   for (const statement of ast.body as AstNode[]) {
     if (statement.type === 'ExportDefaultDeclaration') {
-      edits.push({ start: statement.start, end: statement.declaration.start, code: 'const __render = ' });
+      // Only the keywords change: a parenthesized expression keeps both its parens.
+      const keywords = /^export\s+default\s*/.exec(text.slice(statement.start))![0].length;
+      edits.push({ start: statement.start, end: statement.start + keywords, code: 'const __render = ' });
     }
   }
   for (const node of outermostJsx(ast)) edits.push({ start: node.start, end: node.end, code: emitJsx(text, node) });

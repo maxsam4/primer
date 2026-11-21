@@ -3,7 +3,7 @@ import * as Y from 'yjs';
 import { Node as PmNode } from '@tiptap/pm/model';
 import { yXmlFragmentToProsemirrorJSON } from 'y-prosemirror';
 import type { DocumentFormat } from '@polygonlabs/primer-api-types';
-import { blockVersion, findBlock } from './blocks.ts';
+import { blockVersion } from './blocks.ts';
 import { serverEditor } from './editor.ts';
 import { sign, verify } from './signing.ts';
 
@@ -107,13 +107,14 @@ export function pmDocOf(fragment: Y.XmlFragment): PmNode {
 }
 
 /** The recursive version of a group of blocks (C2's block version over each),
+ *  looked up in a `blockIndex` built once per pass,
  *  or null when one of them is gone. Comment and suggestion marks don't count. */
-export function groupVersion(pmDoc: PmNode, ids: string[]): string | null {
+export function groupVersion(index: Map<string, PmNode>, ids: string[]): string | null {
   const hash = createHash('sha256');
   for (const id of ids) {
-    const found = findBlock(pmDoc, id);
-    if (!found) return null;
-    hash.update(blockVersion(found.node)).update('\0');
+    const node = index.get(id);
+    if (!node) return null;
+    hash.update(blockVersion(node)).update('\0');
   }
   return hash.digest('hex').slice(0, 16);
 }

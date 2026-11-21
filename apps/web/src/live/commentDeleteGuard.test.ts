@@ -39,12 +39,12 @@ describe('commentDeleteGuard', () => {
     ed.apply(ed.state.tr.insertText('!', 18));
     expect(ed.state.doc.textContent).toBe('Hello brave world!');
     // The held change no longer matches the document, so it isn't applied.
-    ed.held!.confirm();
+    expect(ed.held!.confirm()).toBe(false);
     expect(ed.state.doc.textContent).toBe('Hello brave world!');
     // Deleting the word, then "Delete anyway".
     ed.apply(ed.state.tr.delete(7, 12));
     expect(ed.state.doc.textContent).toBe('Hello brave world!');
-    ed.held!.confirm();
+    expect(ed.held!.confirm()).toBe(true);
     expect(ed.state.doc.textContent).toBe('Hello  world!');
   });
 

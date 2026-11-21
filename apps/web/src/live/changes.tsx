@@ -107,9 +107,11 @@ export function CatchUpPanel(props: { documentId: string; since: CatchUpSince; o
         ))}
         {catchUp.decisions.map((d, i) => (
           <li key={`d${i}`}>
-            {d.event === 'made' && d.optionLabel
-              ? t('catchUp.decided', { name: name(d.by), question: d.question ?? '', option: d.optionLabel })
-              : t('catchUp.cleared', { name: name(d.by) })}
+            {d.event === 'cleared'
+              ? t('catchUp.cleared', { name: name(d.by) })
+              : d.optionLabel
+                ? t('catchUp.decided', { name: name(d.by), question: d.question ?? '', option: d.optionLabel })
+                : t('catchUp.picked', { name: name(d.by) })}
           </li>
         ))}
         {catchUp.threads.map((th, i) => (

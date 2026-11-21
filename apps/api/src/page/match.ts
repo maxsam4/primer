@@ -32,7 +32,7 @@ export const MAX_MATCHED = 3000;
 export const MAX_PAIRS = 100_000;
 
 /** The pid of each element of `next` (same order). */
-export function matchPids(previous: PidInfo[], next: PageElement[], budget = MATCH_BUDGET): PidMatch[] {
+export function matchPids(previous: PidInfo[], next: PageElement[], budget = MATCH_BUDGET, taken: string[] = []): PidMatch[] {
   let spent = 0;
   const result: (PidMatch | null)[] = next.map(() => null);
   const used = new Set<string>();
@@ -117,9 +117,9 @@ export function matchPids(previous: PidInfo[], next: PageElement[], budget = MAT
     }
   }
 
-  // 4. Fresh pids, numbered above every pid in use.
+  // 4. Fresh pids, numbered above every pid in use or still holding a fragment.
   let n = 0;
-  for (const pid of [...previous.map((p) => p.pid), ...next.flatMap((e) => (e.keptPid ? [e.keptPid] : []))]) {
+  for (const pid of [...previous.map((p) => p.pid), ...taken, ...next.flatMap((e) => (e.keptPid ? [e.keptPid] : []))]) {
     const m = /^p(\d+)$/.exec(pid);
     if (m) n = Math.max(n, Number(m[1]));
   }

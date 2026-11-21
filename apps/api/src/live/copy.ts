@@ -1,20 +1,23 @@
 import * as Y from 'yjs';
-import type { Node as PmNode } from '@tiptap/pm/model';
+import { Node as PmNode } from '@tiptap/pm/model';
 import type { Transform } from '@tiptap/pm/transform';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 import type { Refusal } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { commentReactions, comments, docFiles, docUpdates, documents, threads, versions, widgets } from '../db/schema.ts';
 import { readableLiveDoc } from '../lib/liveThreads.ts';
+import { logger } from '../logger.ts';
 import type { Storage } from '../storage/types.ts';
+import { blockVersion } from './blocks.ts';
 import { referencedFiles } from './bundle.ts';
 import { captureState, writeCheckpoint } from './checkpoint.ts';
 import { SYSTEM_ORIGIN } from './origin.ts';
-import { applyPlan, type PlannedEdit } from './pipeline.ts';
+import { fragmentDoc } from './marks.ts';
+import { applyPlan, contentVersion, indexBlocks, type PlannedEdit } from './pipeline.ts';
 import { isOwnSourceKey, sourceKeyOf } from '../page/publish.ts';
-import { isTabFragment, pageBlocks, reachableFragments, tabsOf, targetOfFragment } from './reach.ts';
+import { isTabFragment, pageBlocks, reachableFragments, tabFragmentName, tabsOf, targetOfFragment } from './reach.ts';
 import { rewriteSources, trustedMeta, trustedSources } from './sources.ts';
 import { rebuildTaskIndex } from './tasks.ts';
 import { widgetBlocks } from '../widgets/bundle.ts';
@@ -89,14 +92,29 @@ export async function copyDocument(
   // The latest original is checkpoint 1's; a page's stamped source is keyed by
   // that checkpoint's id, which is where purging looks for it.
   const original = await copyOriginal(storage, sourceId);
-  const pageSources = await copyPageSources(storage, sourceId, documentId, pageBlocks(ydoc), original?.versionId);
+  const firstVersionId = original?.versionId ?? uuidv7();
+  const pageSources = await copyPageSources(storage, sourceId, documentId, pageBlocks(ydoc), firstVersionId);
   const widgetHashes = new Map<string, string>();
   const widgetRows = await copyWidgets(sourceId, documentId, widgetBlocks(ydoc), ids, widgetHashes);
   const tabs = tabsOf(ydoc);
   // Page text, embed and widget label fragments: their marks follow the policy too.
   const subFragments = reachableFragments(ydoc).filter((name) => !isTabFragment(name));
+  const sourceBlocks = new Map<string, PmNode>();
+  if (files.length > 0) {
+    for (const tab of tabs) for (const [id, b] of indexBlocks(fragmentDoc(ydoc.getXmlFragment(tabFragmentName(tab.id))))) sourceBlocks.set(id, b.node);
+  }
   ydoc.destroy();
   const rewrite = <T>(value: T): T => JSON.parse(JSON.stringify(value).replace(UUID, (id) => ids.get(id.toLowerCase()) ?? id)) as T;
+  // A suggestion's `base` is a hash of the block it was made against; the
+  // rewrite changes file links inside it, so the hash is taken again.
+  const rewriteEdits = (edits: unknown): unknown =>
+    (rewrite(edits) as { target: { blockId: string }; base: string | null }[]).map((e) => {
+      const node = e.base ? sourceBlocks.get(e.target.blockId) : undefined;
+      if (!node) return e;
+      const moved = PmNode.fromJSON(node.type.schema, rewrite(node.toJSON()));
+      const base = e.base === contentVersion(node) ? contentVersion(moved) : e.base === blockVersion(node) ? blockVersion(moved) : e.base;
+      return { ...e, base };
+    });
 
   await db.transaction(async (tx) => {
     await tx.insert(documents).values({
@@ -117,7 +135,7 @@ export async function copyDocument(
     if (widgetRows.length > 0) await tx.insert(widgets).values(widgetRows);
     if (kind === 'branch') {
       await copyThreads(tx, sourceId, documentId, ids);
-      await copySuggestions(tx, sourceId, documentId, ids, rewrite);
+      await copySuggestions(tx, sourceId, documentId, ids, rewriteEdits);
       await tx.execute(sql`
         INSERT INTO doc_decisions (document_id, block_id, decision_id, option_id, question, option_label, rationale, evidence, open_questions, decided_by, decided_at, archived_at)
         SELECT ${documentId}, block_id, decision_id, option_id, question, option_label, rationale, evidence, open_questions, decided_by, decided_at, archived_at
@@ -136,29 +154,39 @@ export async function copyDocument(
     `);
   });
 
-  // Marks and file links are rewritten through the pipeline, by the system
-  // (no mention, task or suggestion follows from it).
-  await applyPlan(documentId, SYSTEM_ORIGIN, {
-    onConflict: 'refuse',
-    annotation: true,
-    edits: [
-      ...tabs.map((tab): PlannedEdit => ({
-        target: { tabId: tab.id, blockId: '' },
-        inverse: false,
-        build: (tr) => rewriteIds(tr, kind, ids, { widgetHashes, pageSources }),
-      })),
-      ...subFragments.map((name): PlannedEdit => ({
-        target: targetOfFragment(name)!,
-        inverse: false,
-        build: (tr) => rewriteIds(tr, kind, ids),
-      })),
-    ],
-  });
-  // A fork's task blocks are its own tracked tasks; a branch's stay the parent's.
-  if (kind === 'fork') await rebuildTaskIndex(documentId);
+  // The rows are committed: a failure past here removes the copy again (its
+  // rows go with the document; the storage objects are deleted by hand).
+  const stored = [...files.map((f) => f.storageKey), ...pageSources.values()];
+  if (original) stored.push(original.originalKey);
+  try {
+    // Marks and file links are rewritten through the pipeline, by the system
+    // (no mention, task or suggestion follows from it).
+    await applyPlan(documentId, SYSTEM_ORIGIN, {
+      onConflict: 'refuse',
+      annotation: true,
+      edits: [
+        ...tabs.map((tab): PlannedEdit => ({
+          target: { tabId: tab.id, blockId: '' },
+          inverse: false,
+          build: (tr) => rewriteIds(tr, kind, ids, { widgetHashes, pageSources }),
+        })),
+        ...subFragments.map((name): PlannedEdit => ({
+          target: targetOfFragment(name)!,
+          inverse: false,
+          build: (tr) => rewriteIds(tr, kind, ids),
+        })),
+      ],
+    });
+    // A fork's task blocks are its own tracked tasks; a branch's stay the parent's.
+    if (kind === 'fork') await rebuildTaskIndex(documentId);
 
-  await writeCheckpoint(storage, documentId, actor, null, await captureState(documentId, actor), original);
-  return { ok: true, documentId };
+    await writeCheckpoint(storage, documentId, actor, null, await captureState(documentId, actor), original, { fixedVersionId: firstVersionId });
+    return { ok: true, documentId };
+  } catch (err) {
+    await db.delete(documents).where(eq(documents.id, documentId)).catch(() => undefined);
+    for (const key of stored) await storage.delete(key).catch(() => undefined);
+    throw err;
+  }
 }
 
 /** Comment marks re-pointed through `ids` (a branch; marks of threads not in
@@ -244,13 +272,21 @@ async function copyPageSources(
   sourceId: string,
   documentId: string,
   pages: ReturnType<typeof pageBlocks>,
-  firstVersionId?: string,
+  firstVersionId: string,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (const page of pages) {
     if (out.has(page.sourceKey) || !isOwnSourceKey(sourceId, page.sourceKey)) continue;
-    const to = sourceKeyOf(documentId, out.size === 0 && firstVersionId ? firstVersionId : uuidv7());
-    await storage.put(to, new Uint8Array(await new Response(await storage.get(page.sourceKey)).arrayBuffer()));
+    // A key naming no object (an editor wrote it) is left uncopied: the page shows as unavailable, the copy still happens.
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await new Response(await storage.get(page.sourceKey)).arrayBuffer());
+    } catch (err) {
+      logger.warn({ sourceId, blockId: page.blockId, err }, 'copy: page source unreadable, not copied');
+      continue;
+    }
+    const to = sourceKeyOf(documentId, out.size === 0 ? firstVersionId : uuidv7());
+    await storage.put(to, bytes);
     out.set(page.sourceKey, to);
   }
   return out;
@@ -334,7 +370,7 @@ async function copySuggestions(
   sourceId: string,
   documentId: string,
   ids: Map<string, string>,
-  rewrite: <T>(value: T) => T,
+  rewriteEdits: (edits: unknown) => unknown,
 ): Promise<void> {
   const rows = (await tx.execute(sql`
     SELECT author_id AS "authorId", change_set_id AS "changeSetId", tab_id AS "tabId", target_ids AS "targetIds", edits, conflict, created_at AS "createdAt"
@@ -346,7 +382,7 @@ async function copySuggestions(
       INSERT INTO suggestions (id, document_id, author_id, run_id, change_set_id, tab_id, target_ids, edits, conflict, created_at)
       VALUES (${uuidv7()}, ${documentId}, ${r.authorId}, NULL, ${r.changeSetId ? ids.get(r.changeSetId)! : null}, ${r.tabId},
               ${sql`ARRAY[${sql.join(r.targetIds.map((id) => sql`${id}`), sql`, `)}]::text[]`},
-              ${JSON.stringify(rewrite(r.edits))}::jsonb, ${r.conflict}, ${r.createdAt})
+              ${JSON.stringify(rewriteEdits(r.edits))}::jsonb, ${r.conflict}, ${r.createdAt})
     `);
   }
 }
@@ -356,7 +392,7 @@ async function copyOriginal(storage: Storage, sourceId: string) {
   const [latest] = await db
     .select({ originalKey: versions.originalKey, sourceFormat: versions.sourceFormat })
     .from(versions)
-    .where(eq(versions.documentId, sourceId))
+    .where(and(eq(versions.documentId, sourceId), isNotNull(versions.originalKey)))
     .orderBy(desc(versions.versionNumber))
     .limit(1);
   if (!latest?.originalKey || (latest.sourceFormat !== 'markdown' && latest.sourceFormat !== 'text' && latest.sourceFormat !== 'html')) return undefined;

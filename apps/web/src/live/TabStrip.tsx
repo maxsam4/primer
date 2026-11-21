@@ -17,7 +17,7 @@ export function useTabs(doc: Y.Doc): Tab[] {
 }
 
 /**
- * The tab strip of a live document. Editors add, rename (double-click) and
+ * The tab strip of a live document. Editors add, rename (double-click, or F2 on a focused tab) and
  * delete tabs; the first tab is the document itself and can't be deleted.
  * Shown once there is more than one tab, or to editors who can add one.
  */
@@ -56,6 +56,12 @@ export function TabStrip(props: { doc: Y.Doc; tabs: Tab[]; active: string; onSel
               data-tab-id={tab.id}
               onClick={() => onSelect(tab.id)}
               onDoubleClick={() => !readOnly && setRenaming(tab.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'F2' && !readOnly) {
+                  e.preventDefault();
+                  setRenaming(tab.id);
+                }
+              }}
               className={`h-8 border-b-2 px-3 text-xs ${
                 tab.id === active
                   ? 'border-neutral-900 font-medium text-neutral-900 dark:border-neutral-100 dark:text-neutral-100'

@@ -27,27 +27,37 @@ export function readTabs(doc: Y.Doc): Tab[] {
   return tabs;
 }
 
-/** Replaces the tab list in one transaction (it syncs like any edit). */
-function writeTabs(doc: Y.Doc, tabs: Tab[]): void {
-  doc.transact(() => {
-    const array = doc.getArray<Tab>('tabs');
-    array.delete(0, array.length);
-    array.push(tabs);
-  });
-}
+// Each change touches only its own entry of the shared array, so concurrent
+// adds, renames and deletes by different people merge instead of one person's
+// whole-list rewrite resurrecting or duplicating the other's tabs.
+
+const idOf = (entry: unknown): unknown => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : undefined);
 
 export function addTab(doc: Y.Doc, title: string): Tab {
   const tab = { id: crypto.randomUUID(), title };
-  writeTabs(doc, [...readTabs(doc), tab]);
+  doc.getArray<Tab>('tabs').push([tab]);
   return tab;
 }
 
 export function renameTab(doc: Y.Doc, id: string, title: string): void {
-  writeTabs(doc, readTabs(doc).map((t) => (t.id === id ? { ...t, title } : t)));
+  const array = doc.getArray<unknown>('tabs');
+  const at = array.toArray().findIndex((entry) => idOf(entry) === id);
+  doc.transact(() => {
+    if (at === -1) {
+      // `main` has no entry until it is first renamed.
+      if (id === MAIN_TAB) array.push([{ id, title }]);
+      return;
+    }
+    array.delete(at, 1);
+    array.insert(at, [{ id, title }]);
+  });
 }
 
 /** Deletes a tab (never `main`). Its content stays in the Y.Doc, unreachable. */
 export function deleteTab(doc: Y.Doc, id: string): void {
   if (id === MAIN_TAB) return;
-  writeTabs(doc, readTabs(doc).filter((t) => t.id !== id));
+  const array = doc.getArray<unknown>('tabs');
+  doc.transact(() => {
+    for (let i = array.length - 1; i >= 0; i--) if (idOf(array.get(i)) === id) array.delete(i, 1);
+  });
 }

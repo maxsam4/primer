@@ -35,11 +35,21 @@ export interface MenuInput {
   isTemplate?: boolean;
   /** The viewer owns it (marks it as a template). */
   isOwner?: boolean;
+  /** A page document exports as HTML only (it has no Markdown). */
+  page?: boolean;
 }
 
 /** Pure function: given who's viewing, return the ordered menu items. The
  *  caller maps each item to a click handler. */
-export function buildMenuItems({ isUploader, includeShare = false, live = false, isBranch = false, isTemplate = false, isOwner = false }: MenuInput): MenuItem[] {
+export function buildMenuItems({
+  isUploader,
+  includeShare = false,
+  live = false,
+  isBranch = false,
+  isTemplate = false,
+  isOwner = false,
+  page = false,
+}: MenuInput): MenuItem[] {
   const items: MenuItem[] = [];
   if (includeShare && isUploader) {
     items.push({ id: 'share', label: t('libDocumentActionsMenu.share') });
@@ -47,7 +57,7 @@ export function buildMenuItems({ isUploader, includeShare = false, live = false,
   }
   if (live) {
     items.push(
-      { id: 'export-markdown', label: t('libDocumentActionsMenu.exportMarkdown') },
+      ...(page ? [] : [{ id: 'export-markdown' as const, label: t('libDocumentActionsMenu.exportMarkdown') }]),
       { id: 'export-html', label: t('libDocumentActionsMenu.exportHtml') },
       { id: 'export-print', label: t('libDocumentActionsMenu.printPdf') },
       { id: 'separator' },

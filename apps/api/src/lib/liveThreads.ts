@@ -11,9 +11,11 @@ import {
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { commentReactions, comments, documents, threads, users } from '../db/schema.ts';
-import { AnchorMissingError, commentMarkEdit, quoteMarkEdit, type RelativeSelection } from '../live/marks.ts';
+import { withLiveDocument } from '../live/instance.ts';
+import { AnchorMissingError, commentMarkEdit, quoteMarkEdit, removeMarkEdit, type RelativeSelection } from '../live/marks.ts';
 import { originFor } from '../live/origin.ts';
 import { applyPlan, type PlannedEdit } from '../live/pipeline.ts';
+import { fragmentName, reachableFragments } from '../live/reach.ts';
 import { logger } from '../logger.ts';
 import { validateAndCleanMentions } from '../notifications/mentions.ts';
 import type { Notifier } from '../notifications/notifier.ts';
@@ -95,7 +97,7 @@ export async function createLiveThread(
   if (!mentions.ok) return badRequest(mentions.message, 'Mention user ids from primer_lookup_user.');
 
   if (anchor.type === 'data-point' && (await isDataTableTarget(documentId, anchor.target))) {
-    const problem = await dataTableAnchorProblem(documentId, anchor, user);
+    const problem = await dataTableAnchorProblem(documentId, anchor);
     if (problem) return badRequest(problem, 'Comment on a row of the table: row is its record id, column a column key or "" for the whole row.');
   } else if (anchor.type === 'widget-part' || anchor.type === 'data-point') {
     const problem = await widgetAnchorProblem(documentId, anchor);
@@ -114,16 +116,26 @@ export async function createLiveThread(
   }
 
   const commentId = uuidv7();
-  await transactionWithEvents(async (tx, emit) => {
-    await tx.insert(threads).values({ id: threadId, documentId, versionId: null, anchor });
-    await tx.insert(comments).values({ id: commentId, threadId, authorId: user.id, body, mentions: mentions.mentions });
-    emit({
-      documentId,
-      actorId: user.id,
-      type: 'comment.created',
-      payload: { document_id: documentId, version_id: null, thread_id: threadId, comment_id: commentId, author_id: user.id },
+  try {
+    await transactionWithEvents(async (tx, emit) => {
+      await tx.insert(threads).values({ id: threadId, documentId, versionId: null, anchor });
+      await tx.insert(comments).values({ id: commentId, threadId, authorId: user.id, body, mentions: mentions.mentions });
+      emit({
+        documentId,
+        actorId: user.id,
+        type: 'comment.created',
+        payload: { document_id: documentId, version_id: null, thread_id: threadId, comment_id: commentId, author_id: user.id },
+      });
     });
-  });
+  } catch (err) {
+    // The mark is in the document already; without rows it would point at nothing.
+    if (anchor.type === 'prose') {
+      await applyPlan(documentId, originFor(user), { onConflict: 'refuse', edits: [removeMarkEdit(threadId, anchor.target.tabId)] }).catch(
+        (undoErr) => logger.error({ err: undoErr, threadId }, 'live thread: mark left behind after a failed insert'),
+      );
+    }
+    throw err;
+  }
 
   const [owner] = (await db.execute(sql`
     SELECT ${ownerPersonOf(sql`d.uploader_id`)} AS id FROM documents d WHERE d.id = ${documentId}
@@ -183,6 +195,10 @@ export async function reanchorThread(
   if (req.target !== undefined && !isTarget(req.target)) return badRequest('The target is invalid.', 'Send target: { tabId, blockId }.');
   let target: Target = req.target ?? row.anchor.target;
 
+  // A deleted tab or page keeps its fragment in the Y.Doc; a mark there is on nothing a reader sees.
+  if (!(await withLiveDocument(row.documentId, (ydoc) => reachableFragments(ydoc).includes(fragmentName(target))))) {
+    return targetMissing('The text this comment was on is no longer in the document (its tab or page was removed).');
+  }
   let quote = typeof req.quote === 'string' && req.quote !== '' ? req.quote : row.anchor.quote;
   let edit: PlannedEdit;
   if (typeof req.anchor === 'string' && typeof req.head === 'string') {

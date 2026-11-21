@@ -172,6 +172,35 @@ describe('branches', () => {
       expect((await markdownOf(parent, agent)).slice(0, 3)).toEqual(['Gamma', 'Alpha', 'Beta']);
     });
   });
+
+  it('blocks moved together keep their order relative to each other', async () => {
+    await withStorage(async (storage) => {
+      const { parent, branch } = await branched(storage);
+      const agent = await makeAgent();
+      const bv = await versions(branch, agent);
+      await ops(branch, agent, { ops: [{ op: 'move', target: main('c'), at: main('a'), position: 'before', expectVersion: bv.c }] });
+      await ops(branch, agent, { ops: [{ op: 'move', target: main('img'), at: main('a'), position: 'before', expectVersion: bv.img }] });
+
+      await propose(storage, branch);
+      await decideChangeSet(branch, owner, 'accept');
+      expect((await markdownOf(parent, agent)).map((m) => (m.startsWith('!') ? 'img' : m))).toEqual(['Gamma', 'img', 'Alpha', 'Beta']);
+    });
+  });
+
+  it('a comment the parent added to unchanged text survives a proposed edit of the block', async () => {
+    await withStorage(async (storage) => {
+      const { parent, branch } = await branched(storage);
+      const agent = await makeAgent();
+      const parentThread = await comment(parent, 'a', 'Alpha');
+      const bv = await versions(branch, agent);
+      await ops(branch, agent, { ops: [{ op: 'update', target: main('a'), block: 'Alpha, edited on the branch', expectVersion: bv.a }] });
+
+      await propose(storage, branch);
+      await decideChangeSet(branch, owner, 'accept');
+      expect((await markdownOf(parent, agent))[0]).toBe('Alpha, edited on the branch');
+      expect(await withLiveDoc(parent, (doc) => commentedThreadIds(fragmentDoc(doc.getXmlFragment('document-store'))))).toContain(parentThread);
+    });
+  });
 });
 
 describe('forks', () => {

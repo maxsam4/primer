@@ -81,7 +81,7 @@ import {
 import { EventsGrantPrompt } from '../components/EventsGrantPrompt.tsx';
 import { api } from '../lib/fetch.ts';
 import { ApiError } from '../lib/apiError.ts';
-import type { CheckpointResponse } from '@polygonlabs/primer-api-types';
+import type { CatchUpSince, CheckpointResponse } from '@polygonlabs/primer-api-types';
 import type { LiveEditorProps } from '../live/LiveEditor.tsx';
 
 // BlockNote and its blocks load only when a live document opens.
@@ -161,6 +161,12 @@ function DocumentPageInner() {
   const { docId, versionNumber: versionNumberParam } = useParams();
   const navigate = useNavigate();
   const docQuery = useDocument(docId ?? '');
+  // This visit's baseline: the previous visit as the server reported it on this
+  // page's own fetch, not the cached copy of an earlier one.
+  const [visit, setVisit] = useState<{ docId: string; lastView: CatchUpSince | null } | null>(null);
+  useEffect(() => {
+    if (docId && docQuery.data && !docQuery.isFetching && visit?.docId !== docId) setVisit({ docId, lastView: docQuery.data.lastView ?? null });
+  }, [docId, docQuery.data, docQuery.isFetching, visit?.docId]);
   const versionsQuery = useVersionsQuery(docId ?? '');
   const queryClient = useQueryClient();
   const versions = versionsQuery.data?.versions ?? [];
@@ -378,7 +384,11 @@ function DocumentPageInner() {
       },
       onDocChange: (row) =>
         row.type === 'version.published' ? follower.onVersionPublished() : onDocChangeRef.current(row),
-      onResync: () => onResyncRef.current(),
+      // A version.published that landed before the stream was up never came through it.
+      onResync: () => {
+        onResyncRef.current();
+        follower.onVersionPublished();
+      },
       fetchImpl: (url) => api(url),
       eventSourceFactory: browserEventSourceFactory,
     });
@@ -855,7 +865,9 @@ function DocumentPageInner() {
     // Live documents are edited in place, not republished.
     onAddVersion: canEdit && !readMostly && !isLive ? () => setShowAddVersion(true) : undefined,
     onSaveCheckpoint: liveView && canEdit ? saveCheckpoint : undefined,
-    onExport: isLive ? exportAs : undefined,
+    // A version from before the document went live has no bundle to export or print.
+    onExport: isLive && (liveView || currentVersion?.bundled !== false) ? exportAs : undefined,
+    page: docQuery.data?.document.format === 'html',
     isUploader,
     onShare: () => setShowShare(true),
     onOpenFullScreen: openFullScreen,
@@ -1022,7 +1034,9 @@ function DocumentPageInner() {
             role={docQuery.data?.myRole ?? 'stranger'}
             canComment={docQuery.data?.canComment ?? false}
             onOpenLegacyVersion={(n) => navigate(`/d/${docId}/v/${n}`)}
-            lastView={docQuery.data?.lastView ?? null}
+            lastView={visit && visit.docId === docId ? visit.lastView : undefined}
+            onArtifactMessage={onMessage}
+            registerArtifactSender={registerSender}
             frame={() =>
               currentVersionId && (
                 <ArtifactIframe

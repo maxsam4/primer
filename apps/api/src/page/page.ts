@@ -32,18 +32,25 @@ async function seedBlocks(embed: Embed): Promise<PartialBlock[]> {
 /**
  * Edits that seed every fragment of a newly published page: each pid with its
  * stamped text, each embed with its source's blocks. `pids` limits the pid
- * edits (a republish carries pids itself); embeds are always reseeded from the
- * new source.
+ * edits (a republish carries pids itself). Embeds are seeded from the new
+ * source, except (with `previous`, the last published source) those whose
+ * source did not change: people's edits to them stay.
  */
 export async function seedPage(opts: {
   tabId: string;
   blockId: string;
   stamped: string;
   pids?: PidInfo[];
+  previous?: string;
 }): Promise<PlannedEdit[]> {
   const pids = opts.pids ?? readPids(opts.stamped);
   const read = readEmbeds(opts.stamped);
-  const embeds = 'embeds' in read ? read.embeds : [];
+  const earlier = opts.previous === undefined ? null : readEmbeds(opts.previous);
+  const before = new Map((earlier && 'embeds' in earlier ? earlier.embeds : []).map((e) => [e.embedId, e]));
+  const embeds = ('embeds' in read ? read.embeds : []).filter((e) => {
+    const old = before.get(e.embedId);
+    return !(old && old.kind === e.kind && old.html === e.html && old.lang === e.lang);
+  });
   const edits: PlannedEdit[] = pids.map((p) => setPidText({ tabId: opts.tabId, blockId: opts.blockId, pid: p.pid }, p.text));
   for (const embed of embeds) {
     const node = serverEditor()._blocksToProsemirrorNode((await seedBlocks(embed)) as never);

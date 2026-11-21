@@ -10,7 +10,8 @@ import { applyOps } from './ops.ts';
 import { recordsApi } from '../records/store.ts';
 import { AGENT, OWNER, READER, VIEWER, seedRecordsDoc } from '../records/records.testlib.ts';
 import { addChoice, choiceTally, clearDecision, exportDecisions, flushDecisionSync, listDecisions, pick, proposePick, vote } from './choices.ts';
-import { exportHtml, exportMarkdown } from './export.ts';
+import { exportHtml, exportMarkdown, exportText } from './export.ts';
+import { getLiveDoc } from './read.ts';
 import { serverEditor } from './editor.ts';
 import { paragraph, seedBlocks, withLiveDoc } from './live.testlib.ts';
 import type { Target } from '@polygonlabs/primer-api-types';
@@ -183,6 +184,11 @@ describe('choice blocks', () => {
     expect(forged).not.toContain('forged');
     expect(forged).not.toContain('Forger');
     expect(forged).not.toContain('Decision:');
+    // Nor in what an agent reads of the document.
+    for (const format of ['markdown', 'html', 'json'] as const) {
+      const read = await getLiveDoc(doc, OWNER, { format });
+      expect(JSON.stringify(read.ok && read.value.blocks)).not.toContain('forged');
+    }
 
     // A real pick shows there, with who made it as the server knows them.
     const choice = await choiceIn(doc);
@@ -191,6 +197,11 @@ describe('choice blocks', () => {
     expect(real).toContain('Fast reads');
     expect(real).toContain('Ada');
     expect(real).not.toContain('Forger');
+    // The plain-text export carries the question and the decision too.
+    const text = await withLiveDoc(doc, async (d) => exportText(d, doc, await exportDecisions(doc)));
+    expect(text).toContain('Choice: Which database?');
+    expect(text).toContain('Decision: DuckDB');
+    expect(text).toContain('Fast reads');
   });
 
   it('relabelling after a pick keeps what was decided and flags the change', async () => {

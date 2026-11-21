@@ -181,14 +181,12 @@ export async function addCollaborator(
 
   let target: { id: string; displayName: string } | undefined;
   if (input.userId !== undefined) {
-    if (input.userId === doc.uploaderId) return OWNER_NOT_COLLABORATOR;
     [target] = await db
       .select({ id: users.id, displayName: actorName })
       .from(users)
       .where(eq(users.id, input.userId));
   } else if (input.email !== undefined) {
     target = (await lookupUserByEmail(input.email)) ?? undefined;
-    if (target?.id === doc.uploaderId) return OWNER_NOT_COLLABORATOR;
   }
   if (!target) {
     return fail(
@@ -198,6 +196,12 @@ export async function addCollaborator(
       'target user does not exist',
     );
   }
+  // Both the uploader and, for an agent's upload, the person it acts for own the document.
+  const [uploader] = await db
+    .select({ viaUserId: users.viaUserId })
+    .from(users)
+    .where(and(eq(users.id, doc.uploaderId), eq(users.kind, 'agent')));
+  if (target.id === doc.uploaderId || target.id === uploader?.viaUserId) return OWNER_NOT_COLLABORATOR;
 
   // Responder is allowed on org documents because it grants what org visibility
   // does not (event-write); commenter is not because it grants nothing there.

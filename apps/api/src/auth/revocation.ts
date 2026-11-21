@@ -26,8 +26,15 @@ export type ResolvedAuth = {
  * for the Hono context the resolvers read (`req.header`) and write
  * (`set('authMethod' | 'tokenScopes')`).
  */
-export async function resolveFromHeaders(resolver: UserResolver, headers: Headers): Promise<ResolvedAuth | null> {
+export async function resolveFromHeaders(
+  resolver: UserResolver,
+  headers: Headers,
+  /** A recheck only validates: it must not slide the session's expiry, or an
+   *  idle open socket would keep a session alive forever. */
+  opts: { validateOnly?: boolean } = {},
+): Promise<ResolvedAuth | null> {
   const vars = new Map<string, unknown>();
+  if (opts.validateOnly) vars.set('validateOnly', true);
   const shim = {
     req: { header: (name: string) => headers.get(name) ?? undefined },
     set: (key: string, value: unknown) => void vars.set(key, value),
@@ -93,9 +100,25 @@ export async function recheckAccess(match: AccessMatch): Promise<void> {
   }
 }
 
-/** True while `headers` still resolve to `user` (not revoked, expired or
- *  signed out). */
-export async function stillResolves(resolver: UserResolver, headers: Headers, user: AuthUser): Promise<boolean> {
-  const again = await resolveFromHeaders(resolver, headers);
-  return again !== null && again.user.id === user.id;
+/** What a connection was opened with: its user, how it authenticated and (for
+ *  bearer) which token. A recheck must resolve to the same credential, or a
+ *  revoked token would fall through to a cookie on the same request. */
+export type OpenedWith = Pick<ResolvedAuth, 'authMethod' | 'credentialHash'> & { userId: string };
+
+/** The recheck of `opened` against `headers`: the fresh resolution when it is
+ *  still the same user and credential (not revoked, expired or signed out),
+ *  else null. Validation only: never slides the session. */
+export async function resolveAgain(resolver: UserResolver, headers: Headers, opened: OpenedWith): Promise<ResolvedAuth | null> {
+  const again = await resolveFromHeaders(resolver, headers, { validateOnly: true });
+  const same =
+    again !== null &&
+    again.user.id === opened.userId &&
+    again.authMethod === opened.authMethod &&
+    again.credentialHash === opened.credentialHash;
+  return same ? again : null;
+}
+
+/** True while `headers` still resolve to the credential `opened` was made with. */
+export async function stillResolves(resolver: UserResolver, headers: Headers, opened: OpenedWith): Promise<boolean> {
+  return (await resolveAgain(resolver, headers, opened)) !== null;
 }

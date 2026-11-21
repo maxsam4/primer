@@ -24,7 +24,7 @@ import { transformHtml } from '../upload/htmlPipeline.ts';
 import { planCarry, type CarryDecision } from './carry.ts';
 import { readEmbeds, type Embed } from './embeds.ts';
 import { renderPage, seedPage } from './page.ts';
-import { readPids, stampPage, type PidInfo } from './stamp.ts';
+import { MAX_NESTING, PageTooDeep, readPids, stampPage, type PidInfo } from './stamp.ts';
 import { setPidText } from './text.ts';
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -65,13 +65,20 @@ export function mainPage(doc: Y.Doc): PageRef | null {
 export type PreparedPage = { stamped: string; pids: PidInfo[]; uncertain: string[]; embeds: Embed[] };
 
 /** Stamps an upload, refusing a page whose `<primer-*>` blocks lack literal ids or that doesn't sanitize. */
-export function preparePage(original: string, previous: PidInfo[] = []): PreparedPage | { refusal: Refusal } {
-  const read = readEmbeds(original);
-  if ('refusal' in read) return read;
-  const { stamped, pids, uncertain } = stampPage(original, previous);
-  const served = transformHtml(stamped);
-  if (!served.ok) return { refusal: { code: 'bad_request', message: served.message, fix: 'Fix the content and publish again.', details: { error: 'parse_failed' } } };
-  return { stamped, pids, uncertain, embeds: read.embeds };
+export function preparePage(original: string, previous: PidInfo[] = [], taken: string[] = []): PreparedPage | { refusal: Refusal } {
+  try {
+    const read = readEmbeds(original);
+    if ('refusal' in read) return read;
+    const { stamped, pids, uncertain } = stampPage(original, previous, taken);
+    const served = transformHtml(stamped);
+    if (!served.ok) return { refusal: { code: 'bad_request', message: served.message, fix: 'Fix the content and publish again.', details: { error: 'parse_failed' } } };
+    return { stamped, pids, uncertain, embeds: read.embeds };
+  } catch (err) {
+    if (err instanceof PageTooDeep || err instanceof RangeError) {
+      return { refusal: { code: 'bad_request', message: `The page nests elements more than ${MAX_NESTING} levels deep.`, fix: 'Flatten the page and publish again.', details: { error: 'parse_failed' } } };
+    }
+    throw err;
+  }
 }
 
 const pageProps = (sourceKey: string, title: string, page: PreparedPage) => ({
@@ -161,8 +168,12 @@ export async function republishPage(
 ): Promise<{ reconciliation: Reconciliation; sourceKey: string } | { refusal: Refusal }> {
   const connection = await liveInstance().openDirectConnection(liveDocName(documentId), SYSTEM_ORIGIN);
   let page: PageRef | null;
+  let taken: string[] = [];
   try {
     page = mainPage(connection.document!);
+    // Pids that still hold a fragment (from any earlier publish) are not reused.
+    const prefix = page ? `page/${page.blockId}/` : '';
+    if (page) taken = [...connection.document!.share.keys()].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
   } finally {
     await connection.disconnect({ unloadImmediately: false });
   }
@@ -171,7 +182,7 @@ export async function republishPage(
     return { refusal: { code: 'not_found', message: 'This document has no page to republish.', fix: 'Create a new document for this page.' } };
   }
   const previous = readPids(previousStamped);
-  const prepared = preparePage(original, previous);
+  const prepared = preparePage(original, previous, taken);
   if ('refusal' in prepared) return prepared;
   const sourceKey = sourceKeyOf(documentId, versionId);
   await storage.put(sourceKey, new TextEncoder().encode(prepared.stamped));
@@ -185,30 +196,48 @@ export async function republishPage(
 
   const decisions: CarryDecision[] = [];
   const props = pageProps(sourceKey, page.title, prepared);
-  const carried = planCarry({ tabId: page.tabId, blockId: page.blockId, previous, next, uncertain: prepared.uncertain, decisions });
-  const edits: PlannedEdit[] = suggesting ? carried : [
-    ...carried,
-    ...(await seedPage({ tabId: page.tabId, blockId: page.blockId, stamped: prepared.stamped, pids: [] })),
-    {
-      target: { tabId: page.tabId, blockId: page.blockId },
-      inverse: true,
-      build: (tr, at) => {
-        if (!at) return { code: 'target_changed', message: 'The page block is gone.', fix: 'Create a new document for this page.' };
-        const content = at.node.firstChild!;
-        tr.setNodeMarkup(at.pos + 1, undefined, { ...content.attrs, ...props });
+  let edits: PlannedEdit[];
+  let reconciliation: Reconciliation;
+  // Updates up to here are from before this republish (who wrote the text it replaces).
+  const before = await latestUpdate(documentId);
+  try {
+    const carried = planCarry({ tabId: page.tabId, blockId: page.blockId, previous, next, uncertain: prepared.uncertain, decisions });
+    edits = suggesting ? carried : [
+      ...carried,
+      ...(await seedPage({ tabId: page.tabId, blockId: page.blockId, stamped: prepared.stamped, pids: [], previous: previousStamped })),
+      {
+        target: { tabId: page.tabId, blockId: page.blockId },
+        inverse: true,
+        build: (tr, at) => {
+          if (!at) return { code: 'target_changed', message: 'The page block is gone.', fix: 'Create a new document for this page.' };
+          const content = at.node.firstChild!;
+          tr.setNodeMarkup(at.pos + 1, undefined, { ...content.attrs, ...props });
+        },
       },
-    },
-  ];
-  const reconciliation = await applyPlan(documentId, originFor(actor), { edits, onConflict: 'refuse' });
-  // The block points at the new source only once its switch applied.
-  if (suggesting || reconciliation.outcomes[edits.length - 1]?.status !== 'applied') {
+    ];
+    reconciliation = await applyPlan(documentId, originFor(actor), { edits, onConflict: 'refuse' });
+  } catch (err) {
+    // The block never pointed at the new source: don't leave it behind.
     await storage.delete(sourceKey).catch(() => undefined);
+    throw err;
+  }
+  // The block points at the new source only once its switch applied.
+  const switched = !suggesting && reconciliation.outcomes[edits.length - 1]?.status === 'applied';
+  if (!switched) await storage.delete(sourceKey).catch(() => undefined);
+  if (!suggesting && !switched) {
+    return {
+      refusal: {
+        code: 'target_changed',
+        message: 'The page block changed while publishing, so the new page source was not set (text edits that applied stay).',
+        fix: 'Read the document and publish again.',
+      },
+    };
   }
 
   // People's text the agent's replaced comes back as their suggestion.
   const lost = decisions.filter((d, i) => d.suggest !== null && reconciliation.outcomes[i]?.status === 'applied');
   for (const d of lost) {
-    const authorId = await lastWriter(documentId, page.blockId, d.pid);
+    const authorId = await lastWriter(documentId, page.blockId, d.pid, before);
     if (!authorId) continue;
     const result = await applyPlan(
       documentId,
@@ -224,12 +253,17 @@ export async function republishPage(
   return { reconciliation, sourceKey };
 }
 
-/** The person who last wrote a pid's text (the newest update that touched its fragment). */
-async function lastWriter(documentId: string, blockId: string, pid: string): Promise<string | null> {
+async function latestUpdate(documentId: string): Promise<number> {
+  const [row] = (await db.execute(sql`SELECT COALESCE(MAX(id), 0)::int AS v FROM doc_updates WHERE document_id = ${documentId}`)) as unknown as { v: number }[];
+  return row?.v ?? 0;
+}
+
+/** The person who last wrote a pid's text (the newest update up to `before` that touched its fragment). */
+async function lastWriter(documentId: string, blockId: string, pid: string, before: number): Promise<string | null> {
   const fragment = `page/${blockId}/${pid}`;
   const [row] = (await db.execute(sql`
     SELECT u.actor_id FROM doc_updates u JOIN users p ON p.id = u.actor_id
-    WHERE u.document_id = ${documentId} AND ${fragment} = ANY(u.touched) AND p.kind = 'person'
+    WHERE u.document_id = ${documentId} AND u.id <= ${before} AND ${fragment} = ANY(u.touched) AND p.kind = 'person'
     ORDER BY u.id DESC LIMIT 1
   `)) as unknown as { actor_id: string }[];
   return row?.actor_id ?? null;

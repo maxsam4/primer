@@ -218,6 +218,24 @@ describe('page documents', () => {
     });
   });
 
+  it('an op on a pid the page no longer has is refused as pid_unknown', async () => {
+    await withStorage(async (storage) => {
+      const agent = await makeAgent(owner.id);
+      const r = await publishPage(storage, PAGE, agent);
+      const page = await pageOf(r.documentId);
+      const before = await getLiveDoc(r.documentId, agent, { format: 'markdown', storage });
+      if (!before.ok) throw new Error(before.refusal.message);
+      const p3 = before.value.pages![0]!.texts.find((t) => t.target.pid === 'p3')!;
+      // The agent republishes the page without that paragraph.
+      const v2 = await publishDocument(storage, html(PAGE.replace('<p>Pricing stays the same.</p>\n', ''), agent, { documentId: r.documentId }));
+      expect(v2.ok).toBe(true);
+      const out = await applyOps(r.documentId, agent, {
+        ops: [{ op: 'update', target: { tabId: 'main', blockId: page.blockId, pid: 'p3' }, expectVersion: p3.version, block: 'Too late.' }],
+      });
+      expect(out.ok && out.value.outcomes[0]).toMatchObject({ status: 'conflict', refusal: { code: 'pid_unknown' } });
+    });
+  });
+
   it("a suggest-mode agent's HTML republish only suggests, and it can't make a legacy document live", async () => {
     await withStorage(async (storage) => {
       const r = await publishPage(storage, PAGE);

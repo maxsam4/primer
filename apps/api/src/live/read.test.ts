@@ -16,6 +16,26 @@ async function read(id: string, opts: Parameters<typeof getLiveDoc>[2]) {
 }
 
 describe('getLiveDoc', () => {
+  it('layout blocks have versions and are not reported deleted', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [
+      {
+        id: 'cols',
+        type: 'columnList',
+        children: [
+          { id: 'c1', type: 'column', children: [paragraph('a', 'Left')] },
+          { id: 'c2', type: 'column', children: [paragraph('b', 'Right')] },
+        ],
+      } as never,
+    ]);
+    const first = await read(id, { format: 'json' });
+    expect(first.blocks.map((b) => b.target.blockId)).toEqual(['cols', 'c1', 'a', 'c2', 'b']);
+    expect(first.blocks.every((b) => /^[0-9a-f]{16}$/.test(b.version))).toBe(true);
+
+    const since = await read(id, { format: 'json', since: 0 });
+    expect(since.deletedIds).toEqual([]);
+  });
+
   it('json read returns ids, versions and flattened depth', async () => {
     const id = await createLiveDoc();
     await seedBlocks(id, [

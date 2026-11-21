@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { BlockPlace, SuggestedEditKind, Target } from '@polygonlabs/primer-api-types';
 import { transactionWithEvents } from '../lib/events.ts';
 import type { LiveOrigin } from './origin.ts';
+import type { SourceEntry } from './sources.ts';
 
 /**
  * One block a suggestion changes, as stored in `suggestions.edits`:
@@ -12,7 +13,10 @@ import type { LiveOrigin } from './origin.ts';
  * - `base`: the version accepting expects the block to still have (the whole
  *   subtree's for `delete`, the block's own content's for `replace` and
  *   `move`), null for `insert`;
- * - `place`: where an `insert` or a moved block goes.
+ * - `place`: where an `insert` or a moved block goes;
+ * - `source`: for a republish's group, the `sources` entry accepting writes
+ *   (`entry`) or drops (`drop`, its key), so the next republish still
+ *   recognises the group.
  */
 export type SuggestedEdit = {
   kind: SuggestedEditKind;
@@ -20,6 +24,7 @@ export type SuggestedEdit = {
   base: string | null;
   proposed: Record<string, unknown> | null;
   place: BlockPlace | null;
+  source?: { entry?: SourceEntry; drop?: string };
 };
 
 /** A suggestion the pipeline made from one planned edit. */

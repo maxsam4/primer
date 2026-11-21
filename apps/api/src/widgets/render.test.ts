@@ -45,6 +45,12 @@ describe('widget modules', () => {
     expect(code).toContain('__h("svg", {');
   });
 
+  it('a parenthesized default export keeps its parens and renders', async () => {
+    const source = 'export default (function render() { return <svg viewBox="0 0 10 10"><rect width="5" height="5" fill="none" /></svg>; });';
+    expect(parseWidget(source).code).toContain('const __render = (function render()');
+    expect(errorsOf(await renderWidget(source, [], 'light'))).toBe('');
+  });
+
   it('renders a flowchart and a bar chart in both themes', async () => {
     const flow = await renderWidget(FLOW, [], 'light');
     expect(errorsOf(flow)).toBe('');

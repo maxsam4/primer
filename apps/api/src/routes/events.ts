@@ -93,7 +93,11 @@ export function registerEventRoutes(
   // Open streams re-resolve their credentials on every recheck, so a revoked
   // token, expired session or logout stops them.
   const stillSignedIn = (c: Context<{ Variables: AppVariables }>) =>
-    stillResolves(deps.resolver, c.req.raw.headers, c.get('user'));
+    stillResolves(deps.resolver, c.req.raw.headers, {
+      userId: c.get('user').id,
+      authMethod: c.get('authMethod') ?? 'cookie',
+      credentialHash: accessKey(c).credentialHash,
+    });
 
   // ── Write: atomic batch ────────────────────────────────────────────
   // Body is uniformly { events: [event…] } — a single send is a batch of
@@ -221,7 +225,9 @@ export function registerEventRoutes(
   // read and on the keepalive tick, so a reader who loses access stops
   // receiving rows and the stream closes.
   app.get('/api/documents/:documentId/events/stream', async (c) => {
-    const documentId = c.req.param('documentId');
+    // Lowercase, as Postgres reports the id in commit wake-ups: an uppercase URL
+    // would replay history but never wake.
+    const documentId = c.req.param('documentId').toLowerCase();
     const user = c.get('user');
     const g = await gate(documentId, user);
     if (g.status === 'not_found') return c.json({ error: 'not_found' }, 404);
@@ -409,6 +415,9 @@ function runEventStream(
       await shutdown();
       return;
     }
+    // The client may have gone while the cursor was read (onAbort already ran);
+    // past here an interval would be installed that nothing clears.
+    if (closed) return;
     started = true;
 
     // The tick doubles as the access re-check, so a stream whose reader

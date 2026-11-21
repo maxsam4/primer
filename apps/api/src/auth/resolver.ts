@@ -76,7 +76,8 @@ export function makeOktaResolver(opts: OktaResolverOptions): UserResolver {
     const found = await lookupSession(sid);
     if (!found) return null;
     // Sliding refresh — fire and forget; refresh failures don't break the request.
-    void refreshSessionIfStale(sid).catch(() => undefined);
+    // Not for a recheck of an open connection (auth/revocation.ts): that only validates.
+    if (!(c.get as (key: string) => unknown)('validateOnly')) void refreshSessionIfStale(sid).catch(() => undefined);
     c.set('authMethod', 'cookie');
     return found.user;
   };

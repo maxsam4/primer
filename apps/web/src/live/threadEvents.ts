@@ -8,6 +8,8 @@ const THREAD_EVENTS = new Set(['comment.created', 'thread.resolved', 'thread.upd
 export const STREAM_REOPENED = 'stream.reopened';
 
 type Listener = (type: string, payload: unknown) => void;
+/** The pseudo event a stream's listeners get each time it (re)connects. */
+const OPEN = 'stream.open';
 type Shared = { source: EventSource; listeners: Set<Listener>; broken: boolean; failures: number; retry?: ReturnType<typeof setTimeout> };
 
 /** One event stream per document, shared by every listener on the page: each
@@ -23,6 +25,9 @@ function connect(documentId: string, shared: Shared): EventSource {
   const source = new EventSource(`/api/documents/${encodeURIComponent(documentId)}/events/stream`);
   source.onopen = () => {
     shared.failures = 0;
+    // A stream starts at the server's head: what happened between a viewer's
+    // first read and this connection is not on it, so listeners read again.
+    for (const l of shared.listeners) l(OPEN, null);
     if (!shared.broken) return;
     shared.broken = false;
     for (const l of shared.listeners) l(STREAM_REOPENED, null);
@@ -118,15 +123,24 @@ export function useThreadEvents(documentId: string, onChange: () => void, types:
  * `primer.data.changed` on the document's stream). The viewer's own writes
  * never come back as events: refresh after them yourself.
  */
-export function useDataChanged(documentId: string, onChange: (collections: string[]) => void): void {
+export function useDataChanged(documentId: string, onChange: (collections: string[]) => void, onOpen?: () => void): void {
   const latest = useRef(onChange);
   latest.current = onChange;
+  const opened = useRef(onOpen);
+  opened.current = onOpen;
   useEffect(() => {
     if (typeof EventSource === 'undefined') return;
     return subscribe(documentId, (type, payload) => {
+      if (type === OPEN) return opened.current?.();
       if (type !== 'data.changed') return;
       const collections = (payload as { collections?: unknown } | null)?.collections;
       if (Array.isArray(collections)) latest.current(collections.filter((c): c is string => typeof c === 'string'));
     });
   }, [documentId]);
+}
+
+/** The viewer's own write to `collections`: the server never sends it back, so
+ *  every table of the page that shows them reads again. */
+export function announceDataChanged(documentId: string, collections: string[]): void {
+  for (const l of streams.get(documentId)?.listeners ?? []) l('data.changed', { collections });
 }

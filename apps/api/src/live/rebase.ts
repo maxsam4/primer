@@ -50,6 +50,15 @@ export function rebaseUpdate(tr: Transform, at: { pos: number; node: PmNode }, i
       if (!sameAttrs(oldContent.attrs, attrs)) tr.setNodeMarkup(contentPos, undefined, attrs);
       return undefined;
     }
+    if (!input.keys?.includes('content')) {
+      // A type change that sets no content keeps the text when the new type holds inline text.
+      if (oldContent.inlineContent && newContent.type.inlineContent) {
+        tr.replaceWith(contentPos, contentPos + oldContent.nodeSize, newContent.type.create(attrs, oldContent.content, newContent.marks));
+        return undefined;
+      }
+      replaceWhole(tr, contentPos, oldContent, newContent, attrs);
+      return 'The block changed type to one that cannot keep its content, so its content was replaced.';
+    }
     replaceWhole(tr, contentPos, oldContent, newContent, attrs);
     return undefined;
   }

@@ -12,10 +12,10 @@ import { MAX_ROWS, renderBoth, widgetIdPrefix, type WidgetRow } from './render.t
 import { labelsOf, withLabels } from './serialize.ts';
 
 /** A widget block in a document state. */
-export type PlacedWidget = { blockId: string; widgetId: string; hash: string; textIds: string[] };
+export type PlacedWidget = { blockId: string; widgetId: string; hash: string; textIds: string[]; element: Y.XmlElement };
 
 /** What a checkpoint keeps of a widget (`widgets/<id>.json`): enough to republish it. */
-type BundledWidget = { widgetId: string; blockId: string; hash: string; source: string; rows: WidgetRow[] | null };
+type BundledWidget = { widgetId: string; blockId: string; hash: string; source: string; rows: WidgetRow[] | null; collection: string | null };
 
 /** Ids read from a Y.Doc are client-written: only a UUID may name a widget
  *  (a lookup, or a storage key) and only a plain name a block. */
@@ -41,7 +41,7 @@ export function widgetBlocks(doc: Y.Doc): PlacedWidget[] {
         const widgetId = String(child.getAttribute('widgetId') ?? '');
         const hash = String(child.getAttribute('hash') ?? '');
         const textIds = String(child.getAttribute('textIds') ?? '').split(' ').filter(Boolean);
-        if (blockId && BLOCK_ID.test(blockId) && UUID.test(widgetId)) out.push({ blockId, widgetId, hash, textIds });
+        if (blockId && BLOCK_ID.test(blockId) && UUID.test(widgetId) && hash) out.push({ blockId, widgetId, hash, textIds, element: child });
       } else walk(child);
     }
   };
@@ -80,6 +80,9 @@ export async function bundleWidgets(
     // A block naming another document's widget, or another block's, draws nothing.
     const row = rows.find((r) => r.id === widget.widgetId && r.blockId === widget.blockId);
     if (!row?.publishedSvgLight || !row.publishedSvgDark || !row.publishedSource) continue;
+    // The block names one publish; a row already on the next one (a publish
+    // landed after the state was captured) would mix two revisions.
+    if (row.publishedHash !== widget.hash) continue;
     let drawn = { light: row.publishedSvgLight, dark: row.publishedSvgDark, hash: row.publishedHash!, rows: row.rows as WidgetRow[] | null };
     if (row.collection) {
       const frozen = snapshotRows(records, row.collection);
@@ -99,6 +102,7 @@ export async function bundleWidgets(
       hash: drawn.hash,
       source: row.publishedSource,
       rows: drawn.rows,
+      collection: row.collection,
     };
     files[`widgets/${widget.widgetId}.json`] = JSON.stringify(kept);
   }
@@ -107,12 +111,21 @@ export async function bundleWidgets(
     const replaced = html.replace(/<div class="primer-widget" data-widget-id="([^"]+)"><\/div>/g, (whole, id: string) => {
       const svg = svgs.get(id);
       return svg
-        ? `<div class="primer-widget"><div class="primer-widget-light">${svg.light}</div><div class="primer-widget-dark">${svg.dark}</div></div>`
+        ? `<div class="primer-widget"><div class="primer-widget-light">${svg.light}</div><div class="primer-widget-dark">${namespaceIds(svg.dark, 'dk-')}</div></div>`
         : '<div class="primer-widget"><p>Widget unavailable</p></div>';
     });
     return replaced.replace('</head>', `<style>${THEME_CSS}</style></head>`);
   };
   return { files, embed };
+}
+
+/** The SVG with its ids and their references under `ns`: both themes sit in
+ *  one page, and a gradient, marker or `<use>` must resolve inside its own. */
+function namespaceIds(svg: string, ns: string): string {
+  return svg
+    .replace(/(\s)id="([^"]*)"/g, `$1id="${ns}$2"`)
+    .replace(/url\(#([^)]*)\)/g, `url(#${ns}$1)`)
+    .replace(/(\shref)="#([^"]*)"/g, `$1="#${ns}$2"`);
 }
 
 /** A widget shows its light SVG unless the page is dark (Primer sets
@@ -159,9 +172,12 @@ export async function restoreWidgets(storage: Storage, bundleKey: string, frozen
         publishedSvgDark: rendered.dark.svg,
         publishedHash: rendered.hash,
         rows: kept.rows,
+        collection: kept.collection ?? null,
         updatedAt: new Date(),
       })
       .where(and(eq(widgets.id, kept.widgetId), eq(widgets.documentId, documentId), eq(widgets.blockId, kept.blockId)));
+    // The block shows the hash of the render just restored (the frozen state may name an earlier live redraw).
+    widget.element.setAttribute('hash', rendered.hash);
   }
 }
 

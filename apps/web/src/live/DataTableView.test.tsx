@@ -87,10 +87,11 @@ describe('DataTableView', () => {
     const update = calls.find((c) => c.path === '/api/documents/d1/records/update')!;
     expect(update.body).toEqual({ collection: 'pipeline', scope: 'shared', recordId: 'acme', data: { value: 1500 }, expectVersion: 1 });
     expect(cell(a.host, 'value').textContent).toBe('1500');
-    // Ben's view still shows what it read…
-    expect(cell(b.host, 'value').textContent).toBe('1200');
+    // The server never echoes Ana's own write, so the other table on the page reads again at once.
+    expect(cell(b.host, 'value').textContent).toBe('1500');
 
-    // …until the coalesced data.changed for the collection arrives.
+    // Someone else's write reaches both through the coalesced data.changed for the collection.
+    store.set('acme', record('acme', { company: 'Acme', stage: 'Lead', value: 1700 }, 3));
     const lists = calls.filter((c) => c.path.endsWith('/records/list')).length;
     await act(async () =>
       FakeEventSource.last!.onmessage!({ data: JSON.stringify({ namespace: 'primer', type: 'data.changed', payload: { collections: ['other'] } }) }),
@@ -100,7 +101,7 @@ describe('DataTableView', () => {
       FakeEventSource.last!.onmessage!({ data: JSON.stringify({ namespace: 'primer', type: 'data.changed', payload: { collections: ['pipeline'] } }) }),
     );
     await settle();
-    expect(cell(b.host, 'value').textContent).toBe('1500');
+    expect(cell(b.host, 'value').textContent).toBe('1700');
 
     await act(async () => a.root.unmount());
     await act(async () => b.root.unmount());

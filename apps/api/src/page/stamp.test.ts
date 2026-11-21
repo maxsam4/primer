@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readPids, stampPage } from './stamp.ts';
 import { splicePage } from './splice.ts';
+import { preparePage } from './publish.ts';
 
 const strip = (html: string) => html.replace(/ data-pid="[^"]*"/g, '');
 
@@ -103,5 +104,21 @@ describe('splicePage', () => {
     expect(out.slice(out.length - (stamped.length - span[1]))).toBe(stamped.slice(span[1]));
     expect(out.slice(span[0], out.length - (stamped.length - span[1]))).toBe('New &lt;text&gt; &amp; more<br>next line');
     expect(readPids(out)[1]!.text).toBe('New <text> & more\nnext line');
+  });
+
+  it('a pid on a script or embed element is removed', () => {
+    const { stamped } = stampPage('<body><p>Text</p><script data-pid="p9">1</script><primer-code data-embed-id="c" data-pid="p8">x</primer-code></body>');
+    expect(stamped).not.toContain('p9');
+    expect(stamped).not.toContain('p8');
+  });
+
+  it('a page nested too deeply is refused, not a server error', () => {
+    const out = preparePage(`<body>${'<div>'.repeat(5000)}text${'</div>'.repeat(5000)}</body>`);
+    expect(out).toMatchObject({ refusal: { code: 'bad_request' } });
+  });
+
+  it('a fresh pid never reuses one that still holds a fragment', () => {
+    const { pids } = stampPage('<body><p>Brand new</p></body>', [], ['p1', 'p7']);
+    expect(pids.map((p) => p.pid)).toEqual(['p8']);
   });
 });

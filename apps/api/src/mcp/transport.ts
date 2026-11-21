@@ -47,7 +47,7 @@ export async function handleMcpRequest(
       name,
       { description: config.description, inputSchema: config.inputSchema },
       async (args: Record<string, unknown>) => {
-        const { images, ...result } = await handler(args ?? {}, user);
+        const { images, ...result } = await handler(args ?? {}, user, tokenScopes(c));
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (images ? { ...result, content: [...result.content, ...images] } : result) as any;
       },

@@ -67,4 +67,10 @@ describe('buildMenuItems', () => {
     const ids = buildMenuItems({ isUploader: true }).map((i) => i.id);
     expect(ids).not.toContain('share');
   });
+
+  it('a page offers HTML but not Markdown export', () => {
+    const ids = buildMenuItems({ isUploader: true, live: true, page: true }).map((i) => i.id);
+    expect(ids).toContain('export-html');
+    expect(ids).not.toContain('export-markdown');
+  });
 });

@@ -6,6 +6,7 @@ import { docUpdates } from '../db/schema.ts';
 import { docQueue } from './queue.ts';
 import { originOf } from './origin.ts';
 import { isTabFragment } from './reach.ts';
+import { logger } from '../logger.ts';
 
 /** Compaction folds the update log into the snapshot above this many rows. */
 export const COMPACT_ABOVE = 500;
@@ -20,7 +21,7 @@ type Row = { id: number | string; update: Uint8Array };
  * `docVersion` is the id of the latest update row (0 for a new document).
  */
 export async function loadYDoc(documentId: string): Promise<{ doc: Y.Doc; docVersion: number }> {
-  return db.transaction(
+  const loaded = await db.transaction(
     async (tx) => {
       const [snapshot] = (await tx.execute(sql`
         SELECT state FROM doc_snapshots WHERE document_id = ${documentId}
@@ -38,11 +39,18 @@ export async function loadYDoc(documentId: string): Promise<{ doc: Y.Doc; docVer
         if (snapshot) Y.applyUpdate(doc, snapshot.state);
         for (const row of rows) Y.applyUpdate(doc, row.update);
       });
-      return { doc, docVersion: Number(latest?.id ?? 0) };
+      return { doc, docVersion: Number(latest?.id ?? 0), rows: rows.length };
     },
     { isolationLevel: 'repeatable read' },
   );
+  // The append-driven check resets with every attach, so many short sessions
+  // never reach it: a load that finds a long log compacts it.
+  if (loaded.rows > COMPACT_ABOVE) void compact(documentId).catch(compactFailed(documentId));
+  return { doc: loaded.doc, docVersion: loaded.docVersion };
 }
+
+const compactFailed = (documentId: string) => (err: unknown) =>
+  logger.warn({ documentId, error: String(err) }, 'live: compaction failed');
 
 type PersistState = {
   /** Resolves to the id of the newest queued insert, once it is stored. */
@@ -95,7 +103,7 @@ export function attachPersistence(
     state.last = job;
     job.then(
       () => {
-        if (++state.inserted % COMPACT_CHECK_EVERY === 0) void compact(documentId).catch(() => undefined);
+        if (++state.inserted % COMPACT_CHECK_EVERY === 0) void compact(documentId).catch(compactFailed(documentId));
       },
       (err: unknown) => {
         if (state.failed) return;
@@ -173,7 +181,7 @@ export function compact(documentId: string, opts: { above?: number } = {}): Prom
 }
 
 /** Elements that are blocks: BlockNote's container plus Primer's layout blocks. */
-const BLOCK_ELEMENTS = new Set([
+export const BLOCK_ELEMENTS = new Set([
   'blockContainer',
   ...Object.values(primerSchema.blockSpecs).flatMap((spec) => (spec.config.layoutOnly ? [spec.config.type] : [])),
 ]);

@@ -25,6 +25,12 @@ describe('importMarkdown', () => {
     }
   });
 
+  it('a file with bare CR line breaks imports and round-trips', async () => {
+    const source = '# Title\r\rSome words here.\r\r- one\r- two\r';
+    const doc = buildLiveDoc(await importMarkdown(source), 'markdown', 'doc-cr');
+    expect(await exportMarkdown(doc, 'doc-cr')).toBe(source);
+  });
+
   it('raw HTML and footnotes become source blocks with a rendered preview', async () => {
     const { blocks } = await importMarkdown(fixture('html-and-footnotes.md'));
     const sources = blocks.filter((b) => b.type === 'source');

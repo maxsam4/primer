@@ -708,7 +708,7 @@ type LiveOp =
   | { op: 'replaceRange'; from: Target; to: Target; blocks: BlockInput[]; expectVersions: Record<string, string> }
   | { op: 'delete'; target: Target; expectVersion: string }
   | { op: 'move'; target: Target; at: Target; position: 'before' | 'after'; expectVersion: string };
-type ApplyOpsRequest = { baseVersion: number; ops: LiveOp[]; runId?: string; onConflict?: 'refuse' | 'suggest'; allowCommentedDelete?: boolean };
+type ApplyOpsRequest = { baseVersion?: number; ops: LiveOp[]; runId?: string; onConflict?: 'refuse' | 'suggest'; allowCommentedDelete?: boolean };
 applyOps(documentId: string, actor: AuthUser, req: ApplyOpsRequest): Promise<Reconciliation | { refusal: Refusal; errors: { index: number; refusal: Refusal }[] }>;
 ```
 

@@ -132,7 +132,7 @@ export const ROUTE_SCOPES: readonly ScopedRoute[] = [
   { method: 'POST', path: '/api/documents/from-conversation', scope: 'documents:write' },
   { method: 'POST', path: '/api/threads/:threadId/promote', scope: 'documents:write' },
   { method: 'GET', path: '/api/me/digest', scope: 'documents:read' },
-  { method: 'POST', path: '/api/me/digest/email', scope: 'documents:read' },
+  { method: 'POST', path: '/api/me/digest/email', scope: 'documents:write' },
   { method: 'GET', path: '/api/documents/:docId/tasks', scope: 'documents:read' },
   { method: 'GET', path: '/api/documents/:docId/assignees', scope: 'documents:read' },
   { method: 'POST', path: '/api/documents/:docId/tasks', scope: 'documents:write' },

@@ -33,6 +33,22 @@ describe('Markdown paste', () => {
     expect(new Set(editor.document.map((b) => b.id)).size).toBe(3);
   });
 
+  it('inserts after the cursor when the target block was removed while the server answered', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.stubGlobal('fetch', async () => {
+      await gate;
+      return Response.json({ blocks });
+    });
+    const editor = mounted();
+    editor.setTextCursorPosition(editor.document[1]!, 'start');
+    const pending = editor.pasteMarkdown('## Pasted\n\nbody');
+    editor.removeBlocks([editor.document[1]!]);
+    release();
+    await pending;
+    expect(editor.document.map((b) => b.type)).toEqual(['paragraph', 'heading', 'paragraph']);
+  });
+
   it('pastes plain text when the server cannot be reached', async () => {
     vi.stubGlobal('fetch', async () => new Response('nope', { status: 500 }));
     const editor = mounted();

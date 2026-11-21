@@ -2,7 +2,9 @@ import * as Y from 'yjs';
 import type { Target, WidgetLabelOutcome } from '@polygonlabs/primer-api-types';
 import type { PlannedEdit } from '../live/pipeline.ts';
 import { fragmentFor, MAIN_TAB, tabFragmentName, tabsOf } from '../live/reach.ts';
-import { readPidText, setPidText } from '../page/text.ts';
+import { withLiveDocument } from '../live/instance.ts';
+import { docText, readPidText, setPidText, writeText } from '../page/text.ts';
+import { labelsOf } from './serialize.ts';
 
 /**
  * A label's words live in its fragment `widget/<blockId>/<textId>`, shaped
@@ -67,4 +69,41 @@ export function carryLabels(
     }
   }
   return { texts, outcomes };
+}
+
+/** Each label's current words in `row`'s widget block, by text id (null: none yet). */
+export async function fragmentLabels(row: { documentId: string; blockId: string }, textIds: string[]): Promise<Record<string, string | null>> {
+  if (textIds.length === 0) return {};
+  return withLiveDocument(row.documentId, (doc) =>
+    Object.fromEntries(textIds.map((textId) => [textId, readLabel(doc, row.blockId, textId)])),
+  );
+}
+
+/** Each label's words once `theirs` (a new render's labels) is published over `row`'s publish. */
+export async function carryFor(row: { documentId: string; blockId: string; publishedSvgLight: string | null }, theirs: Record<string, string>) {
+  const base = row.publishedSvgLight ? labelsOf(row.publishedSvgLight) : {};
+  return carryLabels(base, await fragmentLabels(row, Object.keys(theirs)), theirs);
+}
+
+/**
+ * A label's new words, carried against the words the fragment holds when the
+ * write is applied (inside the pipeline's turn), so a person's edit made
+ * while the publish was in flight is carried, never overwritten.
+ */
+export function carryEdit(target: Target & { textId: string }, base: string | undefined, agentText: string): PlannedEdit {
+  return {
+    target,
+    inverse: false,
+    build: (tr) => {
+      let started = false;
+      tr.doc.descendants((node) => {
+        if (node.type.name === 'blockContainer' && node.attrs.id === target.blockId) started = true;
+        return !started;
+      });
+      const mine = started ? docText(tr.doc) : null;
+      const base1: Record<string, string> = base === undefined ? {} : { x: base };
+      const { texts } = carryLabels(base1, { x: mine }, { x: agentText });
+      writeText(tr, target.blockId, texts.x!.replace(/\s+/g, ' ').trim());
+    },
+  };
 }

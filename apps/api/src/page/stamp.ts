@@ -33,6 +33,15 @@ const SKIP = new Set(['script', 'style', 'template', 'textarea', 'title', 'head'
 export const isEmbedTag = (tag: string) => tag.startsWith('primer-');
 const VALID_PID = /^[A-Za-z0-9_-]{1,64}$/;
 
+/** Deepest element nesting a page may have; past it the page is refused (the walks recurse). */
+export const MAX_NESTING = 512;
+
+export class PageTooDeep extends Error {
+  constructor() {
+    super(`The page nests elements more than ${MAX_NESTING} levels deep.`);
+  }
+}
+
 /**
  * The one text form for page text, used for seeding fragments, splicing,
  * three-way comparison and the bridge's script-drawn check: `<br>` is `\n`;
@@ -56,9 +65,14 @@ function scan(html: string): { elements: (PageElement & { el: Element })[]; stra
   const elements: (PageElement & { el: Element })[] = [];
   const strays: Element[] = [];
 
-  const visit = (el: Element, path: string, pre: boolean): void => {
+  const visit = (el: Element, path: string, pre: boolean, depth: number): void => {
+    if (depth > MAX_NESTING) throw new PageTooDeep();
     const tag = el.tagName;
-    if (SKIP.has(tag) || isEmbedTag(tag)) return;
+    if (SKIP.has(tag) || isEmbedTag(tag)) {
+      // Never page text: a pid here would make the bridge write into it.
+      if (el.attrs.some((a) => a.name === 'data-pid')) strays.push(el);
+      return;
+    }
     const inPre = pre || tag === 'pre';
     const parts = textParts(el);
     const loc = el.sourceCodeLocation;
@@ -83,7 +97,7 @@ function scan(html: string): { elements: (PageElement & { el: Element })[]; stra
       if (!('tagName' in child)) continue;
       const n = counts.get(child.tagName) ?? 0;
       counts.set(child.tagName, n + 1);
-      visit(child, `${path ? `${path}/` : ''}${child.tagName}[${n}]`, inPre);
+      visit(child, `${path ? `${path}/` : ''}${child.tagName}[${n}]`, inPre, depth + 1);
     }
   };
 
@@ -96,7 +110,7 @@ function scan(html: string): { elements: (PageElement & { el: Element })[]; stra
       if (!('tagName' in child)) continue;
       const n = counts.get(child.tagName) ?? 0;
       counts.set(child.tagName, n + 1);
-      visit(child, `${child.tagName}[${n}]`, false);
+      visit(child, `${child.tagName}[${n}]`, false, 1);
     }
   }
   return { elements, strays };
@@ -130,12 +144,16 @@ export function readPids(stamped: string): PidInfo[] {
  * that is not page text is removed (the bridge writes text into every element
  * carrying a pid, so a stray one would wipe its children).
  *
+ * `taken` are further pids whose fragments still exist in the document (from
+ * earlier publishes): a fresh pid never reuses one.
+ *
  * `uncertain` lists the pids whose match to `previous` was ambiguous: people's
  * text on them is never carried silently (carry.ts).
  */
 export function stampPage(
   original: string,
   previous: PidInfo[] = [],
+  taken: string[] = [],
 ): { stamped: string; pids: PidInfo[]; uncertain: string[] } {
   const { elements, strays } = scan(original);
 
@@ -145,7 +163,7 @@ export function stampPage(
     if (seen.has(e.keptPid)) delete e.keptPid;
     else seen.add(e.keptPid);
   }
-  const matches = matchPids(previous, elements);
+  const matches = matchPids(previous, elements, undefined, taken);
 
   // Edits as [offset, deleteLength, insert], applied in one pass.
   const edits: [number, number, string][] = [];

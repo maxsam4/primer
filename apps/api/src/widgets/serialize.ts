@@ -57,7 +57,7 @@ export function serializeSvg(tree: WidgetNode, ctx: SerializeContext): Serialize
   const labels: Record<string, string> = {};
   let nodes = 0;
 
-  if (typeof tree !== 'object' || tree === null || Array.isArray(tree) || tree.t !== 'svg') {
+  if (typeof tree !== 'object' || tree === null || Array.isArray(tree) || tree.t !== 'svg' || !isNode(tree)) {
     return fail(['render() must return one <svg> element.']);
   }
   const viewBox = String(tree.p.viewBox ?? '').trim().split(/[\s,]+/).map(Number);
@@ -73,6 +73,10 @@ export function serializeSvg(tree: WidgetNode, ctx: SerializeContext): Serialize
 
   function element(node: { t: string; p: Record<string, unknown>; c: WidgetNode[] }, root: boolean): string {
     if (++nodes > SVG_LIMITS.nodes) throw new Bounds();
+    if (!isNode(node)) {
+      errors.push('A rendered node is malformed: every element needs a tag, an object of props and an array of children.');
+      return '';
+    }
     const tag = node.t;
     if (tag === 'foreignObject' || tag === 'style') {
       errors.push(`<${tag}> is not an element widgets may render.`);
@@ -209,4 +213,10 @@ export function labelsOf(svg: string): Record<string, string> {
     labels[m[2]!] = m[3]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   }
   return labels;
+}
+
+/** An element node as the runtime builds it: a tag, an object of props, an array of children. */
+function isNode(node: unknown): node is { t: string; p: Record<string, unknown>; c: WidgetNode[] } {
+  const n = node as { t?: unknown; p?: unknown; c?: unknown } | null;
+  return typeof n === 'object' && n !== null && typeof n.t === 'string' && typeof n.p === 'object' && n.p !== null && !Array.isArray(n.p) && Array.isArray(n.c);
 }

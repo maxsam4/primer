@@ -127,6 +127,25 @@ export function quoteMarkEdit(
   };
 }
 
+/** Removes the comment mark of `threadId` from a whole tab: the undo of a mark
+ *  placed for a thread whose rows could not be written. */
+export function removeMarkEdit(threadId: string, tabId: string): PlannedEdit {
+  return {
+    target: { tabId, blockId: '' },
+    inverse: false,
+    build: (tr) => {
+      const marks: { from: number; to: number; mark: ReturnType<Schema['mark']> }[] = [];
+      tr.doc.descendants((node, pos) => {
+        for (const mark of node.marks) {
+          if (mark.type.name === COMMENT && mark.attrs.threadId === threadId) marks.push({ from: pos, to: pos + node.nodeSize, mark });
+        }
+        return true;
+      });
+      for (const m of marks) tr.removeMark(m.from, m.to, m.mark);
+    },
+  };
+}
+
 function addComment(
   doc: PmNode,
   range: { from: number; to: number },
@@ -157,7 +176,10 @@ type QuoteRange = { from: number; to: number; blockId: string | null };
 export function findQuote(doc: PmNode, blockId: string, quote: string, opts: { fuzzy?: boolean } = {}): QuoteRange | null {
   if (quote === '') return null;
   let scope = blockId ? findBlock(doc, blockId) : { pos: -1, node: doc };
-  if (!scope && opts.fuzzy) scope = { pos: -1, node: doc };
+  // The block is gone: the search widens to the whole fragment, where the
+  // exact match must be the only one.
+  const widened = !scope && !!opts.fuzzy;
+  if (widened) scope = { pos: -1, node: doc };
   if (!scope) return null;
   const textblocks: { node: PmNode; start: number; blockId: string | null }[] = [];
   scope.node.descendants((node, offset) => {
@@ -166,10 +188,16 @@ export function findQuote(doc: PmNode, blockId: string, quote: string, opts: { f
     textblocks.push({ node, start, blockId: blockIdAt(doc, start) });
     return false;
   });
+  let exact: QuoteRange | null = null;
   for (const tb of textblocks) {
     const index = tb.node.textContent.indexOf(quote);
-    if (index >= 0) return { ...textRange(tb.node, tb.start, index, quote.length), blockId: tb.blockId };
+    if (index < 0) continue;
+    const range = { ...textRange(tb.node, tb.start, index, quote.length), blockId: tb.blockId };
+    if (!widened) return range;
+    if (exact || tb.node.textContent.indexOf(quote, index + 1) >= 0) return null;
+    exact = range;
   }
+  if (exact) return exact;
   return opts.fuzzy ? fuzzyQuote(textblocks, quote) : null;
 }
 
@@ -180,8 +208,9 @@ const MAX_FUZZY_QUOTE = 2000;
 const FUZZY_BUDGET = 20_000_000;
 
 function fuzzyQuote(textblocks: { node: PmNode; start: number; blockId: string | null }[], quote: string): QuoteRange | null {
+  if (quote.length > MAX_FUZZY_QUOTE) return null;
   const wanted = normalizeText(quote);
-  if (wanted.length === 0 || quote.length > MAX_FUZZY_QUOTE) return null;
+  if (wanted.length === 0) return null;
   // A window within reach of 0.8 has a length within 20% of the quote's.
   const minLen = Math.floor(wanted.length * FUZZY_MIN);
   const maxLen = Math.ceil(wanted.length / FUZZY_MIN);
@@ -190,6 +219,7 @@ function fuzzyQuote(textblocks: { node: PmNode; start: number; blockId: string |
   const hits: Hit[] = [];
   for (let k = 0; k < textblocks.length; k++) {
     const text = textblocks[k]!.node.textContent;
+    if (text.length < minLen) continue;
     const starts: number[] = [];
     const ends: number[] = [];
     for (let i = 0; i <= text.length; i++) {
@@ -203,6 +233,11 @@ function fuzzyQuote(textblocks: { node: PmNode; start: number; blockId: string |
       while (first < ends.length && ends[first]! <= from) first++;
       for (let e = first; e < ends.length; e++) {
         const to = ends[e]!;
+        // Normalizing is work too: windows too short to matter are skipped
+        // unread, the rest are charged before they are normalized.
+        if (to - from < minLen) continue;
+        spent += to - from;
+        if (spent > FUZZY_BUDGET) return null;
         const window = text.slice(from, to);
         const len = normalizeText(window).length;
         if (len < minLen) continue;

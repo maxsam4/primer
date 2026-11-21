@@ -9,7 +9,7 @@ export function registerSuggestionRoutes(app: Hono<{ Variables: AppVariables }>)
 
   // The open suggestions, each edit with the block now and as proposed.
   app.get('/api/documents/:docId/suggestions', async (c) => {
-    const out = await listSuggestions(c.get('user'), c.req.param('docId'));
+    const out = await listSuggestions(c.get('user'), c.req.param('docId'), { tabId: c.req.query('tabId'), after: c.req.query('after') });
     return out.ok ? c.json({ suggestions: out.value }, 200) : send(c as never, out);
   });
 

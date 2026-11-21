@@ -70,6 +70,8 @@ export interface EventReadIdentity {
   userId: string;
   isOwner: boolean;
   isCollaborator: boolean;
+  /** Agents are never handed their own `data.changed` (see notOwnDataChanged). */
+  isAgent: boolean;
 }
 
 // ───────────────────────── Access gate ─────────────────────────
@@ -130,6 +132,7 @@ export async function gateEventAccess(documentId: string, actor: AuthUser): Prom
       userId: actor.id,
       isOwner: readsAsOwner,
       isCollaborator: eff !== 'owner' && eff !== 'stranger',
+      isAgent: actor.kind === 'agent',
     },
     mayWrite: canWriteEvents(eff),
   };
@@ -545,9 +548,11 @@ export interface ListEventsPage {
   nextPageToken: string | null;
 }
 
-/** A reader is never handed the `data.changed` events it authored: its own
- *  record writes must not wake it (records/changed.ts). */
-function notOwnDataChanged(authorColumn: SQL, readerId: string): SQL {
+/** An agent is never handed the `data.changed` events it authored: its own
+ *  record writes must not wake it (records/changed.ts). A person keeps them,
+ *  so a second tab of the same person still refreshes. */
+function notOwnDataChanged(authorColumn: SQL, readerId: string, readerIsAgent: boolean): SQL {
+  if (!readerIsAgent) return sql`TRUE`;
   return sql`NOT (namespace = ${PRIMER_EVENT_NAMESPACE} AND type = 'data.changed' AND ${authorColumn} = ${readerId})`;
 }
 
@@ -593,7 +598,7 @@ export async function listEvents(args: ListEventsArgs): Promise<ListEventsPage> 
     OR (audience IN ('collaborators', 'artifact') AND ${tierReadable})
   )`);
 
-  conditions.push(notOwnDataChanged(sql`author_id`, identity.userId));
+  conditions.push(notOwnDataChanged(sql`author_id`, identity.userId, identity.isAgent));
 
   const where = sql.join(conditions, sql` AND `);
   // Fetch one extra row to learn whether another page exists.
@@ -621,7 +626,7 @@ export async function listEvents(args: ListEventsArgs): Promise<ListEventsPage> 
 export async function listOwnedEvents(args: {
   userId: string;
   /** Who reads (the agent itself, not its person): never handed its own
-   *  `data.changed`. */
+   *  `data.changed`. Only agents follow this stream. */
   readerId: string;
   filters: EventFilters;
   afterId: number;
@@ -630,7 +635,7 @@ export async function listOwnedEvents(args: {
   const { userId, readerId, filters, afterId, limit } = args;
   const conditions = [
     sql`e.id > ${afterId}`,
-    notOwnDataChanged(sql`e.author_id`, readerId),
+    notOwnDataChanged(sql`e.author_id`, readerId, true),
     isSelfOrAgentOf(sql`d.uploader_id`, userId),
     sql`d.deleted_at IS NULL`,
     ...filterConditions(filters),

@@ -375,7 +375,9 @@ describe('primer_create_document', () => {
 
     const dir = await fsp.mkdtemp(nodePath.join(os.tmpdir(), 'primer-mcp-test-'));
     const file = nodePath.join(dir, 'artifact.html');
-    await fsp.writeFile(file, '<h1>from disk</h1>', 'utf8');
+    // Raw bytes, not valid UTF-8: they must reach the client untouched.
+    const bytes = Buffer.concat([Buffer.from('<h1>from disk</h1>'), Buffer.from([0xff, 0xfe])]);
+    await fsp.writeFile(file, bytes);
 
     const result = await handlers.primer_create_document({
       title: 'Hello',
@@ -385,7 +387,7 @@ describe('primer_create_document', () => {
 
     expect(client.createDocument).toHaveBeenCalledWith({
       title: 'Hello',
-      content: '<h1>from disk</h1>',
+      content: bytes,
       format: 'html',
       description: undefined,
     });

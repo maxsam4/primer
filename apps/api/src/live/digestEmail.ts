@@ -1,6 +1,7 @@
 import * as Y from 'yjs';
 import type { CatchUpDTO, DigestResponse } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
+import { logger } from '../logger.ts';
 import type { Notifier } from '../notifications/notifier.ts';
 import { getDigest } from './catchup.ts';
 import { serverEditor } from './editor.ts';
@@ -22,14 +23,19 @@ export async function sendDigestEmail(notifier: Notifier, actor: AuthUser, since
   if (actor.kind !== 'person') return { sent: false, documents: 0 };
   const digest = await getDigest(actor, since);
   if (digest.documents.length === 0) return { sent: false, documents: 0 };
-  await notifier.notifyDigest({
-    userId: actor.id,
-    render: async (appBaseUrl) => {
-      const doc = digestDoc(digest, appBaseUrl.replace(/\/$/, ''));
-      const subject = `What changed in ${digest.documents.length} document${digest.documents.length === 1 ? '' : 's'}`;
-      return { subject, html: await exportHtml(doc, subject), text: exportText(doc, '') };
-    },
-  });
+  try {
+    await notifier.notifyDigest({
+      userId: actor.id,
+      render: async (appBaseUrl) => {
+        const doc = digestDoc(digest, appBaseUrl.replace(/\/$/, ''));
+        const subject = `What changed in ${digest.documents.length} document${digest.documents.length === 1 ? '' : 's'}`;
+        return { subject, html: await exportHtml(doc, subject), text: exportText(doc, '') };
+      },
+    });
+  } catch (err) {
+    logger.error({ err, userId: actor.id }, 'digest email not delivered');
+    return { sent: false, documents: digest.documents.length };
+  }
   return { sent: true, documents: digest.documents.length };
 }
 
@@ -60,7 +66,7 @@ function documentBlocks(c: CatchUpDTO, baseUrl: string): Block[] {
   }
   const name = (id: string) => c.people.find((p) => p.id === id)?.displayName ?? 'Someone';
   for (const d of c.decisions) {
-    out.push(bullet(d.event === 'made' && d.optionLabel ? `${name(d.by)} decided "${d.question}": ${d.optionLabel}` : `${name(d.by)} cleared a decision`));
+    out.push(bullet(d.event === 'cleared' ? `${name(d.by)} cleared a decision` : d.optionLabel ? `${name(d.by)} decided "${d.question}": ${d.optionLabel}` : `${name(d.by)} picked an option`));
   }
   for (const t of c.threads) {
     const what = t.event === 'started' ? 'commented on' : t.event === 'replied' ? 'replied on' : 'resolved';

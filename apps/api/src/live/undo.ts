@@ -6,18 +6,19 @@ import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { readableLiveDoc } from '../lib/liveThreads.ts';
 import { canEdit } from '../lib/permissions.ts';
-import { blockVersion, findBlock } from './blocks.ts';
+import { blockVersion, findBlock, hasAnnotations } from './blocks.ts';
 import { serverEditor } from './editor.ts';
 import { insertFirstChild, removeBlock } from './ops.ts';
 import { originFor } from './origin.ts';
-import { applyPlan, contentVersion, type BlockPlace, type PlannedEdit } from './pipeline.ts';
+import { applyPlan, contentVersion, indexBlocks, type BlockPlace, type PlannedEdit } from './pipeline.ts';
 import { loadRun, type RunResult } from './runs.ts';
 
 type InverseRow = {
   target: Target;
   prior: Record<string, unknown> | null;
   afterVersion: string | null;
-  place: BlockPlace | null;
+  /** Where the block was; for a moved block also `after`, where the run left it. */
+  place: (BlockPlace & { after?: BlockPlace }) | null;
 };
 
 /**
@@ -58,7 +59,10 @@ export async function undoRun(runId: string, actor: AuthUser): Promise<RunResult
      ORDER BY id DESC
   `)) as unknown as InverseRow[];
 
-  const edits = rows.map(toEdit);
+  // Put removed blocks back before removing created ones, so removing the
+  // last block (a whole-tab replacement) never trips the last-block guard.
+  const restores = (row: InverseRow) => row.prior !== null && row.afterVersion === null;
+  const edits = [...rows.filter(restores), ...rows.filter((row) => !restores(row))].map(toEdit);
   const value = await applyPlan(run.documentId, originFor(actor), { edits, onConflict: 'suggest' });
   return { ok: true, value };
 }
@@ -84,7 +88,12 @@ function toEdit(row: InverseRow): PlannedEdit {
         return insertAt(tr, prior, row.place!);
       }
       if (!at || stale(contentVersion(at.node) !== row.afterVersion)) return changedSince(row.target);
+      if (row.place?.after && stale(!stillAt(tr.doc, row.target.blockId, row.place.after))) return changedSince(row.target);
       if (contentVersion(prior) !== contentVersion(at.node)) {
+        // Restoring replaces the content whole, which would drop a comment or
+        // suggestion added since: leave such a block as it is (a suggestion
+        // is checked again when accepted).
+        if (stale(hasAnnotations(at.node.firstChild!))) return changedSince(row.target);
         tr.replaceWith(at.pos + 1, at.pos + 1 + at.node.firstChild!.nodeSize, prior.firstChild!);
       }
       if (row.place) {
@@ -96,6 +105,14 @@ function toEdit(row: InverseRow): PlannedEdit {
       }
     },
   };
+}
+
+/** Whether the block is still where the run left it: in the same parent,
+ *  next to the same previous or next sibling. */
+function stillAt(doc: PmNode, blockId: string, after: BlockPlace): boolean {
+  const now = indexBlocks(doc).get(blockId)?.place;
+  if (!now || now.parentId !== after.parentId) return false;
+  return now.prevId === after.prevId || now.nextId === after.nextId;
 }
 
 /** Inserts `node` at its recorded place: after its previous sibling, before

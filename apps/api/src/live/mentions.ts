@@ -71,10 +71,13 @@ export async function syncMentions(notifier: Notifier, documentId: string, actor
       SELECT id, email, display_name AS "displayName", kind, via_user_id AS "viaUserId" FROM users WHERE id = ${pair.userId}
     `)) as unknown as { id: string; email: string; displayName: string; kind: 'person' | 'agent'; viaUserId: string | null }[];
     if (!person) continue;
-    await db.execute(sql`
+    // Notify only for the row this sync inserted (a concurrent sync may have got there first).
+    const inserted = (await db.execute(sql`
       INSERT INTO doc_mentions (document_id, block_id, user_id) VALUES (${documentId}, ${pair.blockId}, ${pair.userId})
       ON CONFLICT DO NOTHING
-    `);
+      RETURNING user_id
+    `)) as unknown as unknown[];
+    if (inserted.length === 0) continue;
     const by = [...(actors.get(pair.blockId) ?? [])];
     if (person.kind !== 'person' || by.length !== 1 || by[0] === person.id) continue;
     const role = await loadEffectiveRole({ id: documentId, uploaderId: doc.uploaderId, visibility: doc.visibility }, person);

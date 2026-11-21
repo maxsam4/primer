@@ -51,7 +51,9 @@ export function registerChoiceRoutes(app: Hono<{ Variables: AppVariables }>): vo
   app.post('/api/documents/:docId/choices/:blockId/vote', async (c) => {
     const body = await jsonBody(c);
     if (!body) return badBody(c);
-    return respond(c, await vote(c.get('user'), c.req.param('docId'), c.req.param('blockId'), body.optionId ?? null));
+    // Withdrawing is an explicit `optionId: null`; a missing or misspelled field is a bad request.
+    if (!('optionId' in body)) return c.json({ error: 'bad_request', message: 'Send { optionId } (an option id, or null to withdraw).' }, 400);
+    return respond(c, await vote(c.get('user'), c.req.param('docId'), c.req.param('blockId'), body.optionId));
   });
 
   app.post('/api/documents/:docId/choices/:blockId/pick', async (c) => {

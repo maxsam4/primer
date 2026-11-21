@@ -9,7 +9,13 @@ export type LiveAuth = ResolvedAuth;
 
 /** The per-connection Hocuspocus context: `auth` from the upgrade, `user`
  *  and `documentId` added once the document is authorised. */
-export type LiveContext = { auth?: LiveAuth; user?: AuthUser; documentId?: string };
+export type LiveContext = {
+  auth?: LiveAuth;
+  /** Re-resolves the opening credential (null once revoked): checked at the first join. */
+  reauth?: () => Promise<LiveAuth | null>;
+  user?: AuthUser;
+  documentId?: string;
+};
 
 /**
  * What a connection may do on a live document: `none` (stranger, deleted,

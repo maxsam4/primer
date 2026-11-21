@@ -105,11 +105,20 @@ export async function listCitations(actor: AuthUser, documentId: string): Promis
       if (!docs.has(entry.docId)) docs.set(entry.docId, await citedDoc(actor, entry.docId));
       const cited = docs.get(entry.docId);
       if (cited) entry.source = { title: cited.title, versionId: entry.versionNumber ? (cited.versions.get(entry.versionNumber) ?? null) : null };
-    } else if (props.url) {
+    } else if (props.url && /^https?:$/.test(safeProtocol(props.url))) {
+      // The Y.Doc is client-writable: only http(s) links go out, as on the write path.
       entry.url = props.url;
     }
     if (actor.kind === 'agent') entry.untrusted = true;
     citations.push(entry);
   }
   return { ok: true, value: { citations } };
+}
+
+function safeProtocol(url: string): string {
+  try {
+    return new URL(url).protocol;
+  } catch {
+    return '';
+  }
 }

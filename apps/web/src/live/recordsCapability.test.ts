@@ -50,6 +50,18 @@ describe('records capability', () => {
     expect(replies[1]).toMatchObject({ callId: 'c2', ok: false, refusal: { code: 'forbidden' } });
   });
 
+  it('answers bad_request for arguments JSON cannot carry', () => {
+    const { calls, fetchImpl } = fakeFetch();
+    const cap = createRecordsCapability({ documentId: DOC, pageTarget: 'v1', fetchImpl });
+    const replies: MsgRecordsResult[] = [];
+    const call = (callId: string, args: unknown) =>
+      cap.call({ type: 'records_call', callId, verb: 'set', args: args as Record<string, unknown> }, (r) => replies.push(r));
+    call('big', { collection: 'c', data: { n: 1n } });
+    call('null', null);
+    expect(replies[0]).toMatchObject({ callId: 'big', ok: false, refusal: { code: 'bad_request' } });
+    expect(calls).toHaveLength(1);
+  });
+
   it('calls beyond 8 in flight are refused; cancel aborts', async () => {
     const { calls, fetchImpl } = fakeFetch();
     const cap = createRecordsCapability({ documentId: DOC, pageTarget: 'v1', fetchImpl });

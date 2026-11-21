@@ -40,4 +40,20 @@ describe('agent awareness', () => {
     expect(watcher.provider.awareness!.getStates().get(real)!.status).toBe('Reading');
     await setAgentAwareness(id, agent, null);
   });
+
+  it('a second run on the document shows from its first update', async () => {
+    const id = await createLiveDoc({ uploaderId: OWNER });
+    await seedBlocks(id, [paragraph('p1', 'Risks')]);
+    const agent = { id: 'agent-aw2', email: 'a2@example.com', displayName: 'Claude (via Mock User)', kind: 'agent' as const, viaUserId: OWNER };
+    await db.insert(users).values({ id: agent.id, email: agent.email, displayName: 'Claude', kind: 'agent', viaUserId: OWNER }).onConflictDoNothing();
+    const watcher = await hub.connect(id, OWNER);
+    const real = agentClientId(agent.id);
+    for (let i = 0; i < 5; i++) await setAgentAwareness(id, agent, { status: `Step ${i}`, cursorBlockId: null });
+    await until(() => watcher.provider.awareness!.getStates().get(real)?.status === 'Step 4');
+    await setAgentAwareness(id, agent, null);
+    await until(() => !watcher.provider.awareness!.getStates().has(real));
+    await setAgentAwareness(id, agent, { status: 'Second run', cursorBlockId: null });
+    await until(() => watcher.provider.awareness!.getStates().get(real)?.status === 'Second run');
+    await setAgentAwareness(id, agent, null);
+  });
 });

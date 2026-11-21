@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { BlockNoteViewEditor, useCreateBlockNote } from '@blocknote/react';
 import { insertOrUpdateBlockForSlashMenu } from '@blocknote/core/extensions';
 import { VersioningSidebar } from '@blocknote/react/versioning';
@@ -32,7 +32,7 @@ import { ThreadActions } from './ThreadActions.tsx';
 import { CatchUpPanel, ChangeHighlights, useCheckpointChanges } from './changes.tsx';
 import { useBlockServices, type ChoiceStore } from './blockServices.ts';
 import { DecisionRegister } from './DecisionRegister.tsx';
-import { PageView } from './PageView.tsx';
+import { PageView, type PageViewContext } from './PageView.tsx';
 import { WidgetView } from './WidgetView.tsx';
 import { DataTableView, type DataTableViewProps } from './DataTableView.tsx';
 import './blocks.css';
@@ -52,7 +52,32 @@ export type LiveEditorProps = {
   onOpenLegacyVersion?: (versionNumber: number) => void;
   /** The viewer's previous visit (document detail `lastView`): catch-up shows what changed since. */
   lastView?: CatchUpSince | null;
+  /** The document route's handling of what a page frame asks of the host
+   *  (open_external, submit_events) and the sender it acks through. */
+  onArtifactMessage?: PageViewContext['onArtifactMessage'];
+  registerArtifactSender?: PageViewContext['registerArtifactSender'];
 };
+
+/** What every page block of this editor needs; read by one stable component
+ *  so a change here updates the frames instead of remounting them. */
+const PageContext = createContext<PageViewContext | null>(null);
+
+function BoundPageView(p: { blockId: string; title: string; sourceKey: string }) {
+  const context = useContext(PageContext);
+  return context ? <PageView {...context} {...p} /> : null;
+}
+
+function BoundWidgetView(p: { blockId: string; props: WidgetBlockProps }) {
+  const context = useContext(PageContext);
+  return context ? <WidgetView {...context} {...p} /> : null;
+}
+
+type BoundDataTableProps = { blockId: string; props: DataTableBlockProps; update: DataTableViewProps['update'] };
+
+function BoundDataTableView(p: BoundDataTableProps & { canWrite: boolean }) {
+  const context = useContext(PageContext);
+  return context ? <DataTableView {...context} {...p} /> : null;
+}
 
 /**
  * A live document in BlockNote, synced over `/collab`, one editor per tab: stock blocks, the
@@ -84,29 +109,36 @@ function LiveEditorView(props: LiveEditorProps & { live: LiveProvider }) {
   // browser is always a person's session).
   const { services, store } = useBlockServices(props.documentId, { canPick: !props.readOnly, canVote: props.canVote });
   // Taken once: a refetch of the document records a newer visit.
-  const [since] = useState(() => props.lastView ?? null);
+  // `undefined`: the visit's fetch has not answered yet.
+  const [since, setSince] = useState(props.lastView);
+  useEffect(() => {
+    if (since === undefined && props.lastView !== undefined) setSince(props.lastView);
+  }, [since, props.lastView]);
   const [catchUp, setCatchUp] = useState<Target[]>([]);
+  useEffect(() => store.watch(props.live.doc), [store, props.live.doc]);
   // Page, widget and data-table blocks render their views and overlay through the block services.
-  const { live, documentId, readOnly, theme, userId, role, userName, canVote, canComment } = props;
-  const withPages = useMemo(() => {
-    const context = {
+  const { live, documentId, readOnly, theme, userId, role, userName, canVote, canComment, onArtifactMessage, registerArtifactSender } = props;
+  const pageContext = useMemo<PageViewContext>(
+    () => ({
       doc: live.doc,
       documentId,
       tabId: active,
       canEdit: !readOnly,
       theme,
       viewer: { id: userId, isOwner: role === 'owner', canComment, name: userName },
-    };
-    const BoundPageView = (p: { blockId: string; title: string }) => <PageView {...context} {...p} />;
-    const BoundWidgetView = (p: { blockId: string; props: WidgetBlockProps }) => <WidgetView {...context} {...p} />;
+      onArtifactMessage,
+      registerArtifactSender,
+    }),
+    [live.doc, documentId, active, readOnly, theme, userId, role, userName, canComment, onArtifactMessage, registerArtifactSender],
+  );
+  const withPages = useMemo(() => {
     // Records are written by whoever may vote (owner, editor, responder).
-    const BoundDataTableView = (p: { blockId: string; props: DataTableBlockProps; update: DataTableViewProps['update'] }) => (
-      <DataTableView {...context} {...p} canWrite={canVote} />
-    );
-    return { ...services, PageView: BoundPageView, WidgetView: BoundWidgetView, DataTableView: BoundDataTableView };
-  }, [services, live.doc, documentId, active, readOnly, theme, userId, role, userName, canVote, canComment]);
+    const DataTableView = (p: BoundDataTableProps) => <BoundDataTableView {...p} canWrite={canVote} />;
+    return { ...services, PageView: BoundPageView, WidgetView: BoundWidgetView, DataTableView };
+  }, [services, canVote]);
   return (
     <PrimerBlocksContext.Provider value={withPages}>
+      <PageContext.Provider value={pageContext}>
       <div className="flex h-full flex-col" data-live-editor={props.documentId}>
         <AgentStatus provider={props.live.provider} />
         <TabStrip doc={props.live.doc} tabs={tabs} active={active} onSelect={setSelected} readOnly={props.readOnly} />
@@ -114,6 +146,7 @@ function LiveEditorView(props: LiveEditorProps & { live: LiveProvider }) {
         {/* One editor per tab fragment, mounted when its tab is opened. */}
         <TabEditor key={active} tabId={active} store={store} catchUp={catchUp} {...props} />
       </div>
+      </PageContext.Provider>
     </PrimerBlocksContext.Provider>
   );
 }
@@ -281,7 +314,7 @@ function TabEditor({
               <option value="all">{t('liveEditor.filterAll')}</option>
             </select>
             <ThreadsSidebar filter={filter} />
-            <ThreadActions store={threadStore} canPromote />
+            <ThreadActions store={threadStore} canPromote canReanchor={canComment} />
           </div>
         )}
         <div

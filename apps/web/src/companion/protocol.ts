@@ -401,13 +401,15 @@ export function parseInboundMessage(raw: unknown): InboundProtocolMessage | null
       if (!Array.isArray(raw.elements) || raw.elements.length > MAX_PAGE_ELEMENTS) return null;
       if (!Array.isArray(raw.embeds) || raw.embeds.length > MAX_PAGE_ELEMENTS) return null;
       const elements: MsgPageElements['elements'] = [];
+      // An invalid or oversize element is left out (so it reads as script-drawn
+      // and stays read-only); it must not void the rest of the page's report.
       for (const e of raw.elements) {
-        if (!isObject(e) || !isPageId(e.pid) || !isString(e.text) || e.text.length > MAX_PAGE_TEXT || !isRect(e.rect)) return null;
+        if (!isObject(e) || !isPageId(e.pid) || !isString(e.text) || e.text.length > MAX_PAGE_TEXT || !isRect(e.rect)) continue;
         elements.push({ pid: e.pid, text: e.text, rect: e.rect });
       }
       const embeds: MsgPageElements['embeds'] = [];
       for (const e of raw.embeds) {
-        if (!isObject(e) || !isPageId(e.embedId) || !isRect(e.rect)) return null;
+        if (!isObject(e) || !isPageId(e.embedId) || !isRect(e.rect)) continue;
         embeds.push({ embedId: e.embedId, rect: e.rect });
       }
       return { type: 'page_elements', elements, embeds };

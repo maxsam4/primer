@@ -68,7 +68,7 @@ const PRESENTATION = [
   'id', 'data-text-id', 'data-anchor', 'data-row', 'data-col',
 ];
 const TAG_ATTRS: Record<string, string[]> = {
-  svg: ['viewBox', 'xmlns', 'preserveAspectRatio', 'role', 'aria-label', 'aria-labelledby', 'aria-describedby', 'font-family'],
+  svg: ['viewBox', 'xmlns', 'preserveAspectRatio', 'width', 'height', 'role', 'aria-label', 'aria-labelledby', 'aria-describedby', 'font-family'],
   g: [], defs: [], title: [], desc: [], symbol: [], textPath: [],
   use: ['href', 'x', 'y', 'width', 'height'],
   path: ['d', 'pathLength'],

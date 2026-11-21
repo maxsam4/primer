@@ -31,12 +31,27 @@ export function routeMarkdownPasteToServer(editor: BlockNoteEditor<any, any, any
       return;
     }
     if (blocks.length === 0) return;
-    // A paste into an empty paragraph replaces it; anywhere else it follows the cursor block.
-    const empty = at.type === 'paragraph' && Array.isArray(at.content) && at.content.length === 0 && at.children.length === 0;
-    const inserted = empty
-      ? editor.replaceBlocks([at], blocks as never).insertedBlocks
-      : editor.insertBlocks(blocks as never, at, 'after');
+    // The server answered after the paste returned, so the block captured then may
+    // have changed or gone: insert at it only while it is still the same empty
+    // paragraph, else after wherever the cursor is now.
+    const current = editor.getBlock(at.id);
+    const target = current ?? editor.getTextCursorPosition().block;
+    const empty =
+      current !== undefined &&
+      current.type === 'paragraph' &&
+      Array.isArray(current.content) &&
+      current.content.length === 0 &&
+      current.children.length === 0;
+    let inserted: { id: string }[];
+    try {
+      inserted = empty
+        ? editor.replaceBlocks([target], blocks as never).insertedBlocks
+        : editor.insertBlocks(blocks as never, target, 'after');
+    } catch {
+      editor.pasteText(markdown);
+      return;
+    }
     const last = inserted[inserted.length - 1];
-    if (last) editor.setTextCursorPosition(last, 'end');
+    if (last) editor.setTextCursorPosition(last as never, 'end');
   };
 }

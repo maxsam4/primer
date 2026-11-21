@@ -26,6 +26,9 @@ export function resolveLocale(language: string | undefined): Locale {
 
 const locale = resolveLocale(typeof navigator === 'undefined' ? undefined : navigator.language);
 
+// The page's own language, for screen readers and hyphenation (index.html says "en").
+if (typeof document !== 'undefined') document.documentElement.lang = locale;
+
 export function currentLocale(): Locale {
   return locale;
 }

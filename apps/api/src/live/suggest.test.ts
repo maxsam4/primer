@@ -8,7 +8,7 @@ import { NoopNotifier } from '../notifications/notifier.ts';
 import { FilesystemStorage } from '../storage/filesystem.ts';
 import { asUserJson } from '../test/harness.ts';
 import { liveDocName, liveInstance } from './instance.ts';
-import { createLiveDoc, makeAgent, markdownOf, ops, paragraph, seedBlocks, until, versions } from './live.testlib.ts';
+import { comment, createLiveDoc, makeAgent, markdownOf, ops, paragraph, seedBlocks, until, versions } from './live.testlib.ts';
 import { decideSuggestion, listSuggestions } from './suggest.ts';
 import { getLiveDoc } from './read.ts';
 import { claimRun, finishRun, requestRun } from './runs.ts';
@@ -266,6 +266,47 @@ describe('suggestions', () => {
     expect(await decideSuggestion(sid, owner, 'accept')).toMatchObject({ ok: false, status: 409, refusal: { code: 'target_changed' } });
     expect(await markdownOf(id, owner)).toEqual(['Alpha', 'Beta by person', 'Gamma']);
     expect((await open(id)).map((s) => s.id)).toEqual([sid]);
+  });
+
+  it('a whole-tab replacement suggestion can be accepted', async () => {
+    const { id, agent } = await setup();
+    const v = await versions(id, agent);
+    const out = await ops(id, agent, {
+      ops: [{ op: 'replaceRange', from: main('a'), to: main('c'), blocks: ['Only'], expectVersions: { a: v.a, b: v.b, c: v.c } }],
+    });
+    const sid = out.outcomes[0]!.suggestionId!;
+    expect(await decideSuggestion(sid, owner, 'accept')).toMatchObject({ ok: true });
+    expect(await markdownOf(id, owner)).toEqual(['Only']);
+  });
+
+  it('a comment added after a replace suggestion makes it stale instead of dropping the comment', async () => {
+    const { id, agent } = await setup();
+    const v = await versions(id, agent);
+    const sid = (await ops(id, agent, { ops: [{ op: 'update', target: main('b'), block: 'Beta by agent', expectVersion: v.b }] })).outcomes[0]!.suggestionId!;
+    await comment(id, 'b', 'Beta');
+
+    expect((await open(id))[0]).toMatchObject({ id: sid, stale: true });
+    expect(await decideSuggestion(sid, owner, 'accept')).toMatchObject({ ok: false, status: 409, refusal: { code: 'target_changed' } });
+  });
+
+  it('two new paragraphs suggested by a republish accept in file order', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'primer-suggest-'));
+    try {
+      const storage = new FilesystemStorage(root);
+      const md = (source: string) => ({ content: new TextEncoder().encode(source), filename: 'doc.md', format: 'markdown' as const });
+      const first = await publishDocument(storage, { actor: owner, title: 'Doc', ...md('Alpha.\n\nOmega.\n') });
+      if (!first.ok) throw new Error(first.refusal.message);
+      const editor = await person('collab-editor');
+      const agent = await makeAgent(editor.id);
+      await grant(first.documentId, editor.id, 'editor');
+
+      const out = await publishDocument(storage, { actor: agent, documentId: first.documentId, ...md('Alpha.\n\nNew one.\n\nNew two.\n\nOmega.\n') });
+      if (!out.ok) throw new Error(out.refusal.message);
+      for (const s of await open(first.documentId)) expect(await decideSuggestion(s.id, owner, 'accept')).toMatchObject({ ok: true });
+      expect(await markdownOf(first.documentId, owner)).toEqual(['Alpha.', 'New one.', 'New two.', 'Omega.']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('a stale op with onConflict suggest becomes a suggestion against the current text', async () => {

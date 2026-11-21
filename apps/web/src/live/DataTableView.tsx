@@ -18,7 +18,7 @@ import type { DataTableBlockProps } from '@primer/blocks';
 import { api } from '../lib/fetch.ts';
 import { t } from '../i18n/index.ts';
 import type { PageViewContext } from './PageView.tsx';
-import { useDataChanged, useThreadEvents } from './threadEvents.ts';
+import { announceDataChanged, useDataChanged, useThreadEvents } from './threadEvents.ts';
 import './dataTable.css';
 
 export type DataTableViewProps = PageViewContext & {
@@ -55,7 +55,8 @@ function newRecordId(): string {
   return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-type Editing = { recordId: string; key: string; value: string };
+/** `version` and `original` are the row as it was when the cell opened: a save is checked against them. */
+type Editing = { recordId: string; key: string; value: string; version: number; original: string };
 
 /**
  * A data-table block in the live editor (M9b): a view over one records
@@ -79,8 +80,11 @@ export function DataTableView(props: DataTableViewProps) {
   const [commenting, setCommenting] = useState<string | null>(null);
   const writable = canWrite && spec !== null && !spec.readOnly;
 
+  // Only the latest read of the current binding may install rows.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
     if (!spec) return;
+    const seq = ++loadSeq.current;
     const all: RecordDTO[] = [];
     let cursor: string | null | undefined;
     do {
@@ -90,6 +94,7 @@ export function DataTableView(props: DataTableViewProps) {
         limit: MAX_RECORDS_PAGE_SIZE,
         ...(cursor ? { cursor } : {}),
       });
+      if (seq !== loadSeq.current) return;
       if (!out.ok) return setError(out.message);
       all.push(...out.value.records);
       cursor = out.value.nextCursor;
@@ -98,10 +103,19 @@ export function DataTableView(props: DataTableViewProps) {
     setMore(Boolean(cursor));
     setRows(all.slice(0, MAX_DATA_TABLE_ROWS));
   }, [documentId, spec?.collection, spec?.scope]);
-  useEffect(() => void load(), [load]);
-  useDataChanged(documentId, (collections) => {
-    if (spec && spec.scope === 'shared' && collections.includes(spec.collection)) void load();
-  });
+  useEffect(() => {
+    // A new binding starts empty: rows and an open edit of the old one are gone.
+    setRows(null);
+    setEditing(null);
+    void load();
+  }, [load]);
+  useDataChanged(
+    documentId,
+    (collections) => {
+      if (spec && spec.scope === 'shared' && collections.includes(spec.collection)) void load();
+    },
+    () => void load(),
+  );
 
   const loadThreads = useCallback(() => {
     void api(`/api/documents/${encodeURIComponent(documentId)}/threads`).then(async (res) => {
@@ -125,15 +139,18 @@ export function DataTableView(props: DataTableViewProps) {
   const commit = async (edit: Editing, column: DataTableColumn) => {
     setEditing(null);
     const row = rows?.find((r) => r.recordId === edit.recordId);
-    if (!row || recordCellText(row.data[edit.key]) === edit.value) return;
+    if (!row || edit.original === edit.value) return;
     const out = await post<{ record: RecordDTO }>(documentId, 'update', {
       collection: spec.collection,
       scope: spec.scope,
       recordId: edit.recordId,
       data: { [edit.key]: cellValue(column.type, edit.value) },
-      expectVersion: row.version,
+      expectVersion: edit.version,
     });
-    if (out.ok) return replace(out.value.record);
+    if (out.ok) {
+      replace(out.value.record);
+      return announceDataChanged(documentId, [spec.collection]);
+    }
     setError(out.status === 409 ? t('dataTable.conflict') : out.message);
     void load();
   };
@@ -146,14 +163,18 @@ export function DataTableView(props: DataTableViewProps) {
       data: {},
       expectVersion: 0,
     });
-    if (out.ok) setRows((list) => [...(list ?? []), out.value.record]);
-    else setError(out.message);
+    if (out.ok) {
+      setRows((list) => [...(list ?? []), out.value.record]);
+      announceDataChanged(documentId, [spec.collection]);
+    } else setError(out.message);
   };
 
   const deleteRow = async (row: RecordDTO) => {
     const out = await post(documentId, 'delete', { collection: spec.collection, scope: spec.scope, recordId: row.recordId, expectVersion: row.version });
-    if (out.ok) setRows((list) => (list ?? []).filter((r) => r.recordId !== row.recordId));
-    else {
+    if (out.ok) {
+      setRows((list) => (list ?? []).filter((r) => r.recordId !== row.recordId));
+      announceDataChanged(documentId, [spec.collection]);
+    } else {
       setError(out.status === 409 ? t('dataTable.conflict') : out.message);
       void load();
     }
@@ -207,7 +228,7 @@ export function DataTableView(props: DataTableViewProps) {
                       <td
                         key={c.key}
                         data-column={c.key}
-                        onClick={() => writable && !active && setEditing({ recordId: row.recordId, key: c.key, value: recordCellText(row.data[c.key]) })}
+                        onClick={() => writable && !active && setEditing({ recordId: row.recordId, key: c.key, value: recordCellText(row.data[c.key]), version: row.version, original: recordCellText(row.data[c.key]) })}
                         className={writable ? 'primer-data-table-editable' : undefined}
                       >
                         {active ? <CellInput column={c} editing={editing} onChange={setEditing} onCommit={(e) => void commit(e, c)} onCancel={() => setEditing(null)} /> : recordCellText(row.data[c.key])}

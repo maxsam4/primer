@@ -4,7 +4,7 @@ import crossws from 'crossws/adapters/node';
 import type { Connection, Document, Hocuspocus, WebSocketLike } from '@hocuspocus/server';
 import type { UserResolver } from '../auth/resolver.ts';
 import { logger } from '../logger.ts';
-import { onAccessRecheck, resolveFromHeaders, type AccessMatch } from '../auth/revocation.ts';
+import { onAccessRecheck, resolveAgain, resolveFromHeaders, type AccessMatch } from '../auth/revocation.ts';
 import { liveAccess, type LiveAuth, type LiveContext } from './auth.ts';
 import { documentIdOf, liveInstance, onPersistenceFailure } from './instance.ts';
 
@@ -57,7 +57,10 @@ export function createHub(deps: { resolver: UserResolver; appOrigin: string }): 
         return { context: { auth } };
       },
       open: (peer) => {
-        const context: LiveContext = { auth: peer.context.auth as LiveAuth };
+        const auth = peer.context.auth as LiveAuth;
+        // Re-resolves the opening credential: onAuthenticate calls it at the first join.
+        const reauth = () => resolveAgain(deps.resolver, peer.request.headers, { ...auth, userId: auth.user.id });
+        const context: LiveContext = { auth, reauth };
         const client = hocuspocus.handleConnection(peer.websocket as unknown as WebSocketLike, peer.request, context);
         (peer as unknown as { _hocuspocus: typeof client })._hocuspocus = client;
         // As Hocuspocus's Server does: pongs count as activity.
@@ -92,8 +95,9 @@ export function createHub(deps: { resolver: UserResolver; appOrigin: string }): 
     let access: 'none' | 'read' | 'write' = 'none';
     try {
       // Re-resolve too: a signed-out session or revoked token loses access.
-      const auth = await resolveFromHeaders(deps.resolver, connection.request.headers);
-      if (auth && auth.user.id === context.auth?.user.id) access = await liveAccess(auth, documentId);
+      // Same credential as at open: a revoked bearer must not fall to a cookie.
+      const auth = context.auth && await resolveAgain(deps.resolver, connection.request.headers, { ...context.auth, userId: context.auth.user.id });
+      if (auth) access = await liveAccess(auth, documentId);
     } catch (err) {
       logger.warn({ documentId, error: String(err) }, 'live: access recheck failed; closing');
     }
@@ -147,12 +151,19 @@ export function createHub(deps: { resolver: UserResolver; appOrigin: string }): 
   return {
     hocuspocus,
     handleUpgrade(req, socket, head) {
-      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      // Not `new URL`: request targets like `//` or `http://[` make it throw, and a
+      // throw out of this listener would take the process down.
+      const path = (req.url ?? '/').split('?')[0];
       if (path !== COLLAB_PATH) {
         socket.destroy();
         return;
       }
-      ws.handleUpgrade(req, socket, head);
+      try {
+        ws.handleUpgrade(req, socket, head);
+      } catch (err) {
+        logger.warn({ error: String(err) }, 'live: upgrade failed');
+        socket.destroy();
+      }
     },
     recheck,
     close() {

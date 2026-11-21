@@ -15,7 +15,6 @@ import {
   type DataTableSpec,
   type RecordsSnapshot,
 } from '@polygonlabs/primer-api-types';
-import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { withLiveDocument } from '../live/instance.ts';
 import { tabFragmentName, tabsOf } from '../live/reach.ts';
@@ -56,24 +55,40 @@ export async function isDataTableTarget(documentId: string, target: { tabId: str
  * Why a comment can't hang on this row of a data table, or null when it can.
  * A row comment is a `data-point` anchor on the table block: `row` is the
  * record id and `column` a column key, or '' for the whole row. The record
- * must exist in the table's collection: a shared one, or the commenter's own
- * personal one.
+ * must exist in the table's collection. Only shared tables take row comments:
+ * a thread is document-wide, so a personal record id in its anchor would reach
+ * every reader (and match their own record of the same id).
  */
-export async function dataTableAnchorProblem(documentId: string, anchor: DataPointAnchor, actor: AuthUser): Promise<string | null> {
+export async function dataTableAnchorProblem(documentId: string, anchor: DataPointAnchor): Promise<string | null> {
   const { tabId, blockId } = anchor.target;
   if (anchor.target.pid || anchor.target.textId || anchor.target.embedId) return 'A row comment targets the data-table block itself.';
   const table = await withLiveDocument(documentId, (doc) => placedTables(doc).find((t) => t.tabId === tabId && t.blockId === blockId));
   if (!table) return `Block ${blockId} is not a data table.`;
   if (!table.spec) return 'The data table names no valid collection.';
+  if (table.spec.scope === 'personal') return 'Rows of a personal data table cannot be commented on: its records belong to each viewer.';
   if (!RECORD_ID_RE.test(anchor.row)) return 'row must be a record id.';
   if (anchor.column !== '' && !table.spec.columns.some((c) => c.key === anchor.column)) return `The table has no column "${anchor.column}".`;
-  const owner = table.spec.scope === 'personal' ? sql`owner_user_id = ${actor.id}` : sql`owner_user_id IS NULL`;
   const [found] = (await db.execute(sql`
     SELECT 1 AS one FROM doc_records
-     WHERE document_id = ${documentId} AND collection = ${table.spec.collection} AND scope = ${table.spec.scope}
-       AND ${owner} AND record_id = ${anchor.row}
+     WHERE document_id = ${documentId} AND collection = ${table.spec.collection} AND scope = 'shared'
+       AND owner_user_id IS NULL AND record_id = ${anchor.row}
   `)) as unknown as { one: number }[];
   return found ? null : `The table has no row "${anchor.row}".`;
+}
+
+/**
+ * Whether a checkpoint holds this data-table row: the table block is in the
+ * captured state and its collection's frozen records have the row (and the
+ * column). Null when the anchor's block is no data table.
+ */
+export function dataTableAnchorFrozen(captured: Y.Doc, snapshot: RecordsSnapshot | null, anchor: DataPointAnchor): boolean | null {
+  const { tabId, blockId } = anchor.target;
+  const table = placedTables(captured).find((t) => t.tabId === tabId && t.blockId === blockId);
+  if (!table) return null;
+  if (!snapshot || !table.spec || table.spec.scope === 'personal') return false;
+  const records = Object.hasOwn(snapshot.collections, table.spec.collection) ? snapshot.collections[table.spec.collection]! : [];
+  if (!records.some((r) => r.recordId === anchor.row)) return false;
+  return anchor.column === '' || table.spec.columns.some((c) => c.key === anchor.column);
 }
 
 const escapeHtml = (text: string) =>

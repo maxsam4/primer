@@ -5,6 +5,8 @@ import { api } from '../lib/fetch.ts';
 export function useDocument(docId: string) {
   return useQuery({
     queryKey: ['document', docId],
+    // Each fetch records a visit and returns the previous one: opening the page is a visit, cached or not.
+    refetchOnMount: 'always',
     queryFn: async (): Promise<DocumentDetailResponse> => {
       const res = await api(`/api/documents/${docId}`);
       if (res.status === 404) {

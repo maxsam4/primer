@@ -40,6 +40,8 @@ function anchorPreview(t: ThreadDTO): string {
   // for legacy rows that pre-date innerText capture.
   if (t.anchor.type === 'element-path' && !t.anchor.innerText) return t.anchor.path;
   const inner = anchorLabel(t.anchor);
+  // Block, widget-part and data-point anchors carry no quote: name the kind instead.
+  if (inner === '') return t.anchor.type;
   return `"${inner.slice(0, 60)}${inner.length > 60 ? '…' : ''}"`;
 }
 

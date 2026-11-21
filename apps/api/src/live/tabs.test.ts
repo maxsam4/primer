@@ -118,6 +118,16 @@ describe('tabs', () => {
     });
   });
 
+  it('a tab left inside a code fence does not swallow the next tab heading', async () => {
+    await withStorage(async (storage) => {
+      const { documentId } = await publish(storage, '# Plan\n\n```js\nconst a = 1;\n');
+      await setTabs(documentId, [{ id: 'main', title: '' }, { id: 'notes', title: 'Notes' }]);
+      await fillTab(documentId, 'notes', 'Hello.');
+      const out = await withLiveDoc(documentId, (doc) => exportMarkdown(doc, documentId));
+      expect(out).toBe('# Plan\n\n```js\nconst a = 1;\n```\n\n# Notes\n\nHello.\n');
+    });
+  });
+
   it('deleting a tab orphans its threads', async () => {
     await withStorage(async (storage) => {
       const app = createApp({ storage, notifier: new NoopNotifier() });

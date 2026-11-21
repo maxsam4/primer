@@ -75,6 +75,18 @@ describe('three-way Markdown republish', () => {
     });
   });
 
+  it('reordered identical groups move', async () => {
+    await withStorage(async (storage) => {
+      const first = await publish(storage, md('Alpha one.\n\nBeta two.\n\nGamma three.\n'));
+      const before = await blocks(first.documentId);
+      const second = await publish(storage, md('Gamma three.\n\nAlpha one.\n\nBeta two.\n', { documentId: first.documentId }));
+      expect(second.reconciliation!.outcomes.map((o) => o.status)).toEqual(['applied']);
+      const now = await blocks(first.documentId);
+      expect(now.map((b) => b.markdown)).toEqual(['Gamma three.', 'Alpha one.', 'Beta two.']);
+      expect(now.map((b) => b.id).sort()).toEqual(before.map((b) => b.id).sort());
+    });
+  });
+
   it('a reworded paragraph counts as changed, not deleted plus inserted', async () => {
     await withStorage(async (storage) => {
       const first = await publish(storage, md('Intro.\n\nThe quarterly numbers grew in every region we track.\n'));

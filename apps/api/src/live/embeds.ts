@@ -31,11 +31,13 @@ const EXCERPT_CHARS = 400;
 const CACHE_TTL_MS = 60 * 60_000;
 const FAILED_TTL_MS = 5 * 60_000;
 const CACHE_MAX = 500;
+/** Inlined images dominate an entry; the cache holds at most this many bytes of them. */
+const CACHE_BYTES = 16 * 1024 * 1024;
 
 export type Page = (url: string, opts: { timeoutMs: number; maxBytes: number; accept: string }) => Promise<SafeResponse>;
 type CardBody = Omit<Extract<EmbedResponse, { kind: 'link' }>, 'echo'>;
 
-const cache = new Map<string, { at: number; ttl: number; card: Promise<CardBody> }>();
+const cache = new Map<string, { at: number; ttl: number; size: number; card: Promise<CardBody> }>();
 
 /** What embed `blockId` of `documentId` shows `actor`. */
 export async function resolveEmbed(
@@ -92,27 +94,41 @@ async function linkCard(url: string, page: Page): Promise<CardBody | null> {
   let entry = cache.get(url);
   if (!entry || now - entry.at > entry.ttl) {
     const card = fetchCard(url, page);
-    entry = { at: now, ttl: CACHE_TTL_MS, card };
+    entry = { at: now, ttl: CACHE_TTL_MS, size: 0, card };
     cache.set(url, entry);
-    for (const key of cache.keys()) {
-      if (cache.size <= CACHE_MAX) break;
-      cache.delete(key);
-    }
-    // A failed fetch is retried sooner than a good card.
+    const added = entry;
     void card.then((c) => {
-      if (!c.title && !c.description && !c.image && entry) entry.ttl = FAILED_TTL_MS;
+      // A failed fetch is retried sooner than a good card.
+      if (!c.title && !c.description && !c.image) added.ttl = FAILED_TTL_MS;
+      added.size = (c.image?.length ?? 0) + 2_000;
+      trimCache();
     });
+    trimCache();
   }
   return entry.card;
+}
+
+/** Drops the oldest entries past the count and the byte budget. */
+function trimCache(): void {
+  let bytes = 0;
+  for (const entry of cache.values()) bytes += entry.size;
+  for (const [key, entry] of cache) {
+    if (cache.size <= CACHE_MAX && bytes <= CACHE_BYTES) break;
+    cache.delete(key);
+    bytes -= entry.size;
+  }
 }
 
 async function fetchCard(url: string, page: Page): Promise<CardBody> {
   const bare: CardBody = { kind: 'link', url, title: '', description: '', siteName: '', image: null };
   try {
+    // One deadline for the page and its image together.
+    const deadline = Date.now() + FETCH_TIMEOUT_MS;
     const res = await page(url, { timeoutMs: FETCH_TIMEOUT_MS, maxBytes: PAGE_BYTES, accept: 'text/html,application/xhtml+xml' });
     if (res.status < 200 || res.status >= 300 || !/html/.test(res.contentType)) return bare;
     const meta = readMeta(res.body.toString('utf8'));
-    const image = meta.image ? await fetchImage(new URL(meta.image, res.url).href, page) : null;
+    const left = deadline - Date.now();
+    const image = meta.image && left > 0 ? await fetchImage(meta.image, res.url, left, page) : null;
     return { kind: 'link', url, title: meta.title, description: meta.description, siteName: meta.siteName, image };
   } catch {
     return bare;
@@ -150,9 +166,10 @@ function clean(text: string, max: number): string {
 }
 
 /** The card image as a `data:` URI, or null. Raster formats only, by content: a page can't send SVG or script through here. */
-async function fetchImage(url: string, page: Page): Promise<string | null> {
+async function fetchImage(src: string, base: string, timeoutMs: number, page: Page): Promise<string | null> {
   try {
-    const res = await page(url, { timeoutMs: FETCH_TIMEOUT_MS, maxBytes: IMAGE_BYTES, accept: 'image/png,image/jpeg,image/webp,image/gif' });
+    const url = new URL(src, base).href;
+    const res = await page(url, { timeoutMs, maxBytes: IMAGE_BYTES, accept: 'image/png,image/jpeg,image/webp,image/gif' });
     if (res.status < 200 || res.status >= 300) return null;
     const type = sniffImage(res.body);
     return type ? `data:${type};base64,${res.body.toString('base64')}` : null;

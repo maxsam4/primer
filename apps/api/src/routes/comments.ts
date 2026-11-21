@@ -1,4 +1,5 @@
 import type { Hono } from 'hono';
+import { placeReopened } from '../lib/threadCarry.ts';
 import { v7 as uuidv7 } from 'uuid';
 import { eq, sql } from 'drizzle-orm';
 import type { AppVariables, AppDeps, AuthUser } from '../app.ts';
@@ -117,11 +118,13 @@ export async function replyToThread(
     FROM threads t
     INNER JOIN documents d ON d.id = t.document_id
     LEFT JOIN LATERAL (
-      -- A thread carried onto newer versions lives on its newest placement.
+      -- A thread carried onto newer versions lives on its newest placement; a
+      -- live thread (no version of its own) has a placement per checkpoint but
+      -- stays on the live document.
       SELECT pv.id, pv.version_number
       FROM thread_placements tp
       INNER JOIN versions pv ON pv.id = tp.version_id
-      WHERE tp.thread_id = t.id
+      WHERE tp.thread_id = t.id AND t.version_id IS NOT NULL
       UNION ALL
       SELECT ov.id, ov.version_number FROM versions ov WHERE ov.id = t.version_id
       ORDER BY version_number DESC
@@ -179,11 +182,21 @@ export async function replyToThread(
       body: validation.body,
       mentions: cleanedMentions,
     });
-    // Auto-reopen if resolved (no-op when not resolved).
-    await tx
-      .update(threads)
-      .set({ resolvedAt: null, resolvedBy: null })
-      .where(eq(threads.id, threadId));
+    // Auto-reopen if resolved (no-op when not resolved). An agent's reply never reopens a
+    // thread a person wrote in: reopening is the people's call (M1.3).
+    const [personWrote] = user.kind === 'agent'
+      ? ((await tx.execute(sql`
+          SELECT 1 FROM comments c INNER JOIN users a ON a.id = c.author_id
+          WHERE c.thread_id = ${threadId} AND a.kind <> 'agent' LIMIT 1
+        `)) as unknown as unknown[])
+      : [];
+    if (!personWrote) {
+      await tx
+        .update(threads)
+        .set({ resolvedAt: null, resolvedBy: null })
+        .where(eq(threads.id, threadId));
+      await placeReopened(tx, threadId);
+    }
     emit({
       documentId: threadCtx.doc_id,
       versionId: threadCtx.version_id ?? undefined,

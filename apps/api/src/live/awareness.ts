@@ -27,6 +27,10 @@ export type AgentAwarenessState = { status: string; cursorBlockId: string | null
  */
 const active = new Map<string, Awareness>();
 
+/** The last clock of a cleared scratch Awareness: peers drop updates whose
+ *  clock isn't above what they hold, so a later run must continue from it. */
+const lastClock = new Map<string, number>();
+
 /** The scratch Awareness of an agent on a document (tests drive its clock). */
 export function agentAwareness(documentId: string, agentId: string): Awareness | undefined {
   return active.get(`${documentId}:${agentId}`);
@@ -70,6 +74,7 @@ export async function setAgentAwareness(documentId: string, agent: AuthUser, sta
     if (aw) {
       active.delete(key);
       aw.destroy();
+      lastClock.set(key, aw.meta.get(aw.clientID)?.clock ?? 0);
     }
     return;
   }
@@ -77,6 +82,8 @@ export async function setAgentAwareness(documentId: string, agent: AuthUser, sta
     const scratch = new Y.Doc();
     scratch.clientID = agentClientId(agent.id);
     aw = new Awareness(scratch);
+    const previous = lastClock.get(key);
+    if (previous !== undefined) aw.meta.set(scratch.clientID, { clock: previous, lastUpdated: Date.now() });
     (aw as unknown as { _checkInterval?: { unref?: () => void } })._checkInterval?.unref?.();
     const forwarder = aw;
     forwarder.on('update', ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {

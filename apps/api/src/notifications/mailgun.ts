@@ -168,7 +168,8 @@ export class MailgunNotifier implements Notifier {
 
   readonly emailEnabled = true;
 
-  private async send(to: string, subject: string, text: string, html: string): Promise<void> {
+  /** Whether Mailgun accepted the message (failures are logged, never thrown). */
+  private async send(to: string, subject: string, text: string, html: string): Promise<boolean> {
     const apiBase = (this.cfg.apiBaseUrl ?? DEFAULT_API_BASE_URL).replace(/\/$/, '');
     const endpoint = `${apiBase}/v3/${encodeURIComponent(this.cfg.domain)}/messages`;
     const authHeader = `Basic ${Buffer.from(`api:${this.cfg.apiKey}`).toString('base64')}`;
@@ -187,9 +188,12 @@ export class MailgunNotifier implements Notifier {
       if (!res.ok) {
         const errBody = await res.text().catch(() => '');
         logger.error({ status: res.status, to, errBody: errBody.slice(0, 300) }, 'mailgun send failed');
+        return false;
       }
+      return true;
     } catch (err) {
       logger.error({ err, to }, 'mailgun fetch threw');
+      return false;
     }
   }
 
@@ -305,7 +309,8 @@ export class MailgunNotifier implements Notifier {
     // Agents have no mailbox (auth/agents.ts).
     if (!recipient || recipient.kind === 'agent') return;
     const { subject, text, html } = await args.render(this.cfg.appBaseUrl);
-    await this.send(recipient.email, subject, text, html);
+    // The on-demand digest reports delivery, so a refusal here is an error.
+    if (!(await this.send(recipient.email, subject, text, html))) throw new Error('Mailgun did not accept the digest.');
   }
 
   async notifyExternalFirstView(args: NotifyExternalFirstViewArgs): Promise<void> {

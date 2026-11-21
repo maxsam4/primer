@@ -109,6 +109,7 @@ function checkData(raw: unknown): string | null {
     return 'data is not JSON-serializable';
   }
   if (json === undefined) return 'data is not JSON-serializable';
+  if (/<\/?untrusted-record-/i.test(json)) return 'data holds <untrusted-record-…> fence markup: write only the keys you change, never text read back from a fenced record';
   return badKey(raw);
 }
 
@@ -309,7 +310,18 @@ async function applyWrite(
   if (Buffer.byteLength(json, 'utf8') > MAX_RECORD_BYTES) {
     throw new Refused(refuse('records_cap', `A record holds at most ${MAX_RECORD_BYTES} bytes of data.`).refusal);
   }
-  const version = (current?.version ?? 0) + 1;
+  // A record recreated after a delete continues from its change count, so
+  // its version never repeats one a reader may have seen.
+  let previous = current?.version ?? 0;
+  if (!current) {
+    const [seen] = (await tx.execute(sql`
+      SELECT count(*)::int AS count FROM doc_record_changes
+       WHERE document_id = ${documentId} AND collection = ${op.collection} AND scope = ${op.scope}
+         AND ${owner === null ? sql`owner_user_id IS NULL` : sql`owner_user_id = ${owner}`} AND record_id = ${op.recordId}
+    `)) as unknown as { count: number }[];
+    previous = seen.count;
+  }
+  const version = previous + 1;
   // A full set is the writer's alone; a merge or a revert adds the writer to
   // whoever shaped the content it keeps.
   const kept = op.verb === 'update' ? current!.contributors : (restoredContributors ?? []);
@@ -417,8 +429,8 @@ async function readPage(
       conditions.push(sql`r.data @> ${JSON.stringify(args.where)}::jsonb`);
     }
     if (args.orderBy !== undefined) {
-      const o = args.orderBy as { key?: unknown; dir?: unknown };
-      if (typeof o.key !== 'string' || !RECORD_KEY_RE.test(o.key) || (o.dir !== 'asc' && o.dir !== 'desc')) {
+      const o = args.orderBy as { key?: unknown; dir?: unknown } | null;
+      if (o === null || typeof o !== 'object' || typeof o.key !== 'string' || !RECORD_KEY_RE.test(o.key) || (o.dir !== 'asc' && o.dir !== 'desc')) {
         return refuse('bad_request', 'orderBy must be { key, dir: "asc" | "desc" }');
       }
       order = o.dir === 'asc'
@@ -460,7 +472,10 @@ function reservedWrite(op: { collection?: unknown }): string | null {
     : null;
 }
 
-export function recordsApi(actor: AuthUser, documentId: string, opts: { reserved?: true } = {}): RecordsApi {
+export function recordsApi(actor: AuthUser, rawDocumentId: string, opts: { reserved?: true } = {}): RecordsApi {
+  // Ids match case-insensitively but the lock key and data.changed key hash
+  // the spelling, so one canonical spelling keeps every writer on one lock.
+  const documentId = rawDocumentId.toLowerCase();
   const gate = async (write: boolean): Promise<RecordsResult<Access>> => {
     const a = await access(documentId, actor);
     if (!a) return refuse('not_found', 'Document not found.');
@@ -581,9 +596,10 @@ function changeDTO(row: ChangeRow, actor: AuthUser): RecordChangeDTO {
  *  personal ones (never anyone else's). Readers of the document only. */
 export async function listRecordChanges(
   actor: AuthUser,
-  documentId: string,
+  rawDocumentId: string,
   args: { since?: number; limit?: number },
 ): Promise<RecordsResult<RecordChangesResponse>> {
+  const documentId = rawDocumentId.toLowerCase();
   const since = args.since ?? 0;
   if (!Number.isInteger(since) || since < 0) return refuse('bad_request', 'since must be a non-negative change id');
   const limit = parseLimit(args.limit);
@@ -621,13 +637,14 @@ export async function revertChange(changeId: number, actor: AuthUser): Promise<R
   const notFound = refuse('not_found', 'Change not found.');
   if (!row) return notFound;
   if (row.scope === 'personal' && row.ownerUserId !== actor.id) return notFound;
-  const reserved = reservedWrite(row);
-  if (reserved) return refuse('bad_request', reserved);
   const a = await access(row.documentId, actor);
   if (!a) return notFound;
   if (row.scope === 'shared' ? !canEdit(a.role) : !a.canWrite) {
     return refuse('forbidden', 'Only the document owner or an editor can revert shared record changes.');
   }
+  // After the access checks, so a caller without access learns nothing (change ids are sequential).
+  const reserved = reservedWrite(row);
+  if (reserved) return refuse('bad_request', reserved);
   const op: RecordBatchOp = row.before === null
     ? { verb: 'delete', collection: row.collection, scope: row.scope, recordId: row.recordId }
     : { verb: 'set', collection: row.collection, scope: row.scope, recordId: row.recordId, data: row.before };
@@ -643,9 +660,10 @@ export async function revertChange(changeId: number, actor: AuthUser): Promise<R
  *  user's personal change log. */
 export async function purgePersonalRecords(
   actor: AuthUser,
-  documentId: string,
+  rawDocumentId: string,
   userId: unknown,
 ): Promise<RecordsResult<{ deleted: number }>> {
+  const documentId = rawDocumentId.toLowerCase();
   if (typeof userId !== 'string' || userId.length === 0) return refuse('bad_request', 'userId is required');
   // Erasing people's data is a person's decision. Agents own what they
   // upload and OAuth tokens carry no scopes, so neither the role nor the

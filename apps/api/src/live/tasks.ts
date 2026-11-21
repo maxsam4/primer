@@ -47,8 +47,9 @@ import {
   validBlockId,
   type Result,
 } from './blockTools.ts';
-import { onLiveUpdate, withLiveDocument } from './instance.ts';
-import type { LiveOrigin } from './origin.ts';
+import { onLiveLoad, onLiveUpdate, withLiveDocument } from './instance.ts';
+import { tabsOf } from './reach.ts';
+import { SYSTEM_ORIGIN, type LiveOrigin } from './origin.ts';
 
 export const TASK_SYNC_DELAY_MS = 500;
 const MAX_TASKS_PER_DOCUMENT = 1_000;
@@ -63,6 +64,8 @@ type BlockTask = { tabId: string; blockId: string; title: string; assigneeId: st
 /** A real calendar date: it must round-trip to the same YYYY-MM-DD. */
 function validDue(raw: unknown): raw is string {
   if (typeof raw !== 'string' || !DUE.test(raw)) return false;
+  // PostgreSQL has no year 0 (its date type starts at 0001-01-01).
+  if (raw.startsWith('0000')) return false;
   const date = new Date(`${raw}T00:00:00Z`);
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === raw;
 }
@@ -123,7 +126,7 @@ export async function reconcileTasks(
       SELECT uploader_id AS "uploaderId", format, deleted_at AS "deletedAt" FROM documents WHERE id = ${documentId}
     `)) as unknown as { uploaderId: string; format: string | null; deletedAt: Date | null }[];
     if (!doc || !doc.format) return;
-    const found = await withLiveDocument(documentId, (d) => tasksIn(d));
+    const { found, tabIds } = await withLiveDocument(documentId, (d) => ({ found: tasksIn(d), tabIds: new Set(tabsOf(d).map((t) => t.id)) }));
     const touchedBy = [...(opts.actors?.values() ?? [])].flatMap((set) => [...set]);
     const ids = [...new Set([...found.map((t) => t.assigneeId), ...touchedBy].filter((id): id is string => Boolean(id)))];
     const known = new Set(
@@ -135,7 +138,7 @@ export async function reconcileTasks(
     );
     for (const t of found) if (t.assigneeId && !known.has(t.assigneeId)) t.assigneeId = null;
     /** The people and agents who changed this block in the window. */
-    const actorsOf = (blockId: string) => [...(opts.actors?.get(blockId) ?? [])].filter((id) => known.has(id)).sort();
+    const actorsOf = (key: string) => [...(opts.actors?.get(key) ?? [])].filter((id) => known.has(id)).sort();
 
     const rows = (await tx.execute(sql`
       SELECT id, tab_id AS "tabId", block_id AS "blockId", title, assignee_id AS "assigneeId",
@@ -148,9 +151,14 @@ export async function reconcileTasks(
       blockId: string,
       type: T,
       payload: Parameters<EmitLifecycle>[0]['payload'] & object,
+      /** Who to credit when nobody touched the block itself. */
+      otherwise?: string,
     ) => {
       if (!opts.emit) return;
-      for (const actorId of actorsOf(blockId)) emit({ documentId, actorId, type, payload } as never);
+      const actors = actorsOf(blockId);
+      for (const actorId of actors.length > 0 || otherwise === undefined ? actors : actorsOf(otherwise)) {
+        emit({ documentId, actorId, type, payload } as never);
+      }
     };
 
     for (const t of found) {
@@ -186,9 +194,13 @@ export async function reconcileTasks(
     }
     for (const row of byBlock.values()) {
       await tx.execute(sql`DELETE FROM doc_tasks WHERE id = ${row.id}`);
-      announce(row.blockId, 'task.deleted', {
-        document_id: documentId, task_id: row.id, block_id: row.blockId, assignee_id: row.assigneeId,
-      });
+      // A task whose tab was removed is credited to whoever changed the tab list.
+      announce(
+        row.blockId,
+        'task.deleted',
+        { document_id: documentId, task_id: row.id, block_id: row.blockId, assignee_id: row.assigneeId },
+        tabIds.has(row.tabId) ? undefined : 'tabs',
+      );
     }
   });
 }
@@ -249,6 +261,12 @@ export async function flushTaskSync(): Promise<void> {
 
 onLiveUpdate(scheduleTaskSync);
 
+// Edits made while a document was unloaded (or before this index existed)
+// reach the rows when it loads: an ordinary scheduled sync with nobody known,
+// so it announces nothing for them, and edits arriving in the same window
+// are still announced to their authors.
+onLiveLoad((documentId) => scheduleTaskSync(documentId, SYSTEM_ORIGIN, []));
+
 // ───────────────────────── Reads ─────────────────────────
 
 type ListRow = Row & { documentId: string; createdBy: string | null; createdAt: Date | string; updatedAt: Date | string };
@@ -290,17 +308,28 @@ export async function listDocumentTasks(actor: AuthUser, documentId: string): Pr
 
 /** The caller's open and done tasks across the documents it can still read. */
 export async function listMyTasks(actor: AuthUser): Promise<Result<TasksResponse>> {
-  const rows = (await db.execute(sql`
-    SELECT ${LIST_COLUMNS}, d.uploader_id AS "uploaderId", d.visibility
-      FROM doc_tasks t JOIN documents d ON d.id = t.document_id
-     WHERE t.assignee_id = ${actor.id} AND d.deleted_at IS NULL
-     ORDER BY t.status, t.updated_at DESC
-     LIMIT 200
-  `)) as unknown as (ListRow & { uploaderId: string; visibility: Visibility })[];
+  const PAGE = 200;
   const tasks: TaskDTO[] = [];
-  for (const r of rows) {
-    const role = await loadEffectiveRole({ id: r.documentId, uploaderId: r.uploaderId, visibility: r.visibility }, actor);
-    if (canRead(r.visibility, role)) tasks.push(dto(r, actor));
+  const readable = new Map<string, boolean>();
+  // Page until 200 readable tasks (documents the caller lost access to must not crowd them out).
+  for (let offset = 0; tasks.length < PAGE; offset += PAGE) {
+    const rows = (await db.execute(sql`
+      SELECT ${LIST_COLUMNS}, d.uploader_id AS "uploaderId", d.visibility
+        FROM doc_tasks t JOIN documents d ON d.id = t.document_id
+       WHERE t.assignee_id = ${actor.id} AND d.deleted_at IS NULL
+       ORDER BY t.status, t.updated_at DESC, t.id
+       LIMIT ${PAGE} OFFSET ${offset}
+    `)) as unknown as (ListRow & { uploaderId: string; visibility: Visibility })[];
+    for (const r of rows) {
+      let ok = readable.get(r.documentId);
+      if (ok === undefined) {
+        const role = await loadEffectiveRole({ id: r.documentId, uploaderId: r.uploaderId, visibility: r.visibility }, actor);
+        ok = canRead(r.visibility, role);
+        readable.set(r.documentId, ok);
+      }
+      if (ok && tasks.length < PAGE) tasks.push(dto(r, actor));
+    }
+    if (rows.length < PAGE) break;
   }
   return { ok: true, value: { tasks } };
 }

@@ -12,6 +12,7 @@ import { markdownTokenizer as md, splitFrontMatter } from '../upload/markdown.ts
 import { sanitizeUploadedHtml } from '../upload/sanitize.ts';
 import { serverEditor } from './editor.ts';
 import { MAIN_TAB, tabFragmentName } from './reach.ts';
+import { blockIndex } from './blocks.ts';
 import { groupVersion, pmDocOf, writeSources, type SourceEntry } from './sources.ts';
 
 export type { SourceEntry } from './sources.ts';
@@ -97,7 +98,7 @@ export function importText(source: string): ImportResult {
     const block: ImportedBlock = {
       id: randomUUID(),
       type: 'paragraph',
-      content: slice.replace(/\r?\n$/, '').replace(/\r\n/g, '\n'),
+      content: slice.replace(/\r?\n$|\r$/, '').replace(/\r\n?/g, '\n'),
       children: [],
     };
     blocks.push(block);
@@ -116,7 +117,7 @@ export function buildLiveDoc(imported: ImportResult, format: DocumentFormat, doc
   const doc = new Y.Doc();
   const fragment = doc.getXmlFragment(tabFragmentName(MAIN_TAB));
   serverEditor().blocksToYXmlFragment(imported.blocks as never, fragment);
-  const stored = pmDocOf(fragment);
+  const stored = blockIndex(pmDocOf(fragment));
   const entries = new Map<string, SourceEntry>();
   for (const [key, entry] of imported.sources) {
     const version = groupVersion(stored, entry.groupIds);
@@ -179,7 +180,8 @@ function findQuote(pm: PmNode, quote: string): { from: number; to: number } | nu
  *  line, so every byte belongs to exactly one line. */
 function lineStarts(s: string): number[] {
   const starts = [0];
-  for (let i = 0; i < s.length; i++) if (s[i] === '\n') starts.push(i + 1);
+  // A bare CR is a line break to markdown-it too; CRLF is one break.
+  for (let i = 0; i < s.length; i++) if (s[i] === '\n' || (s[i] === '\r' && s[i + 1] !== '\n')) starts.push(i + 1);
   return starts;
 }
 

@@ -35,10 +35,10 @@ describe('coalesced data.changed', () => {
     const p = byViewer.payload as { from_change_id: number; to_change_id: number };
     expect(p.to_change_id - p.from_change_id).toBe(9);
 
-    // Nobody is handed their own data.changed: the agent sees the viewer's,
-    // the viewer sees the agent's, the owner sees both.
+    // An agent is never handed its own data.changed (it would wake itself);
+    // a person is, so the same person's second tab refreshes.
     expect(await dataChangedSeenBy(doc, AGENT)).toEqual([VIEWER.id]);
-    expect(await dataChangedSeenBy(doc, VIEWER)).toEqual([AGENT.id]);
+    expect((await dataChangedSeenBy(doc, VIEWER)).sort()).toEqual([AGENT.id, VIEWER.id].sort());
     expect((await dataChangedSeenBy(doc, OWNER)).sort()).toEqual([AGENT.id, VIEWER.id].sort());
     // Same on the owner stream an agent follows for its person.
     const owned = await listOwnedEvents({

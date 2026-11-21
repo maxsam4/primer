@@ -1,8 +1,7 @@
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import type { PromoteConversationRequest, PromoteConversationResponse, Refusal } from '@polygonlabs/primer-api-types';
 import type { AuthUser } from '../app.ts';
 import { db } from '../db/client.ts';
-import { documents } from '../db/schema.ts';
 import { actorNameOf } from '../lib/actors.ts';
 import { canRead, loadEffectiveRole, type Visibility } from '../lib/permissions.ts';
 import { publishDocument } from '../lib/publish.ts';
@@ -73,10 +72,10 @@ export async function promoteConversation(storage: Storage, actor: AuthUser, req
     filename: 'conversation.md',
     format: 'markdown',
     content: new TextEncoder().encode(markdown),
+    // Conversations are often private: the new document is private to its owner from its first row.
+    visibility: 'private',
   });
   if (!published.ok) return published;
-  // Conversations are often private: the new document starts private to its owner.
-  await db.update(documents).set({ visibility: 'private' }).where(eq(documents.id, published.documentId));
   return { ok: true, value: { documentId: published.documentId, versionId: published.versionId } };
 }
 
@@ -98,10 +97,13 @@ export async function promoteThread(storage: Storage, actor: AuthUser, threadId:
      WHERE c.thread_id = ${threadId} AND c.deleted_at IS NULL
      ORDER BY c.created_at, c.id
   `)) as unknown as { author: string; text: string }[];
+  if (messages.length > MAX_MESSAGES) {
+    return bad(`This thread has ${messages.length} comments; a promoted conversation holds at most ${MAX_MESSAGES}.`, 'Copy the part you want into a new document by hand.');
+  }
   const anchor = (typeof thread.anchor === 'string' ? JSON.parse(thread.anchor) : thread.anchor) as { quote?: string; selectorText?: string };
   const about = (anchor.quote ?? anchor.selectorText ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
   return promoteConversation(storage, actor, {
     title: (about ? `${thread.title}: “${about}”` : thread.title).slice(0, MAX_TITLE),
-    messages: messages.slice(0, MAX_MESSAGES),
+    messages,
   });
 }
