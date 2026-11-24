@@ -400,12 +400,7 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
             const removed = removeBlock(tr, from);
             if (removed) return removed;
             const slot = findBlock(tr.doc, `${EXISTING_PREFIX}${id}`)!;
-            // Suggestions and undo follow blocks in nested blocks only, not in layout (columns).
-            const $slot = tr.doc.resolve(slot.pos);
-            const nested = Array.from({ length: $slot.depth + 1 }, (_, d) => $slot.node(d).type.name);
-            if (!nested.every((name) => name === 'doc' || name === 'blockGroup' || name === 'blockContainer')) {
-              return invalid(`Block ${id} can only move in as a nested block, not into a column or other layout.`, 'Move it into the layout with a separate edit.');
-            }
+            if (inLayout(tr.doc, slot.pos)) return outOfLayout(id);
             tr.replaceWith(slot.pos, slot.pos + slot.node.nodeSize, from.node);
             bctx.moved(id);
           }
@@ -502,6 +497,21 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
   }
 }
 
+/** Whether the position is inside a layout block (a column): suggestions and
+ *  undo follow blocks through nesting only. */
+function inLayout(doc: PmNode, pos: number): boolean {
+  const $pos = doc.resolve(pos);
+  for (let d = 0; d <= $pos.depth; d++) {
+    const name = $pos.node(d).type.name;
+    if (name !== 'doc' && name !== 'blockGroup' && name !== 'blockContainer') return true;
+  }
+  return false;
+}
+
+function outOfLayout(id: string): Refusal {
+  return invalid(`Block ${id} can move in only between nested blocks, not into or out of a column or other layout.`, 'Move it with a separate edit.');
+}
+
 /** Why an add can't move its existing blocks in, if it can't: each must be a
  *  block of the tab, not around `at`, at the version read (unless the add is
  *  being suggested against the document as it is). One may be inside another:
@@ -513,6 +523,7 @@ function existingBlocks(doc: PmNode, at: NonNullable<Located>, p: Extract<Prepar
   for (const { id, block } of found) {
     if (!block) return gone({ ...p.at, blockId: id });
     if (block.node.type.name !== 'blockContainer') return invalid(`Block ${id} can't be moved into another block.`, 'Move in ordinary blocks only.');
+    if (inLayout(doc, block.pos)) return outOfLayout(id);
     // Next to it is fine (the new block goes there before the block moves in); in it is not.
     if (at.pos === block.pos ? p.position === 'firstChild' : inside(block, at.pos)) {
       return invalid(`Block ${id} contains \`at\`; it can't move into a block added there.`, 'Pick an `at` outside the blocks you move in.');
