@@ -432,14 +432,20 @@ function blockDiff(before: PmNode, after: PmNode, moved: Set<string>) {
       });
     }
   }
+  const created: typeof inverses = [];
   for (const [id, now] of a) {
     if (b.has(id)) continue;
     const parent = now.place.parentId;
     if (parent !== null && a.has(parent) && !b.has(parent)) continue;
     touched.push({ node: now.node, parentId: now.place.parentId, depth: now.depth });
-    inverses.push({ blockId: id, prior: null, afterVersion: blockVersion(now.node), place: null });
+    // Checked without the blocks it was given that were there before (an
+    // add's `existing`): undo moves those back out before removing it.
+    const own = PmNode.fromJSON(now.node.type.schema, withoutBlocks(now.node.toJSON(), b));
+    created.push({ blockId: id, prior: null, afterVersion: blockVersion(own), place: null });
   }
-  return { inverses, touched };
+  // Undo replays newest first: the other blocks go back in reading order, so
+  // each finds its previous sibling already in place, and created blocks go last.
+  return { inverses: [...created, ...inverses.reverse()], touched };
 }
 
 /**
@@ -459,25 +465,37 @@ function forwardDiff(before: PmNode, after: PmNode, moved: Set<string>, at: Targ
   const sub = at.pid ? { pid: at.pid } : at.textId ? { textId: at.textId } : {};
   const target = (blockId: string): Target => ({ tabId: at.tabId, blockId, ...sub });
   for (const [id, old] of b) {
-    const now = a.get(id);
-    if (!now) {
-      const parent = old.place.parentId;
-      if (parent !== null && b.has(parent) && !a.has(parent)) continue;
-      out.push({ kind: 'delete', target: target(id), base: blockVersion(old.node), proposed: null, place: null });
+    if (a.has(id)) continue;
+    const parent = old.place.parentId;
+    if (parent !== null && b.has(parent) && !a.has(parent)) continue;
+    out.push({ kind: 'delete', target: target(id), base: blockVersion(old.node), proposed: null, place: null });
+  }
+  // In reading order, so a block moved after a sibling that also moved finds it in place.
+  for (const [id, now] of a) {
+    const old = b.get(id);
+    if (old) {
+      const changed = contentVersion(old.node) !== contentVersion(now.node);
+      const place = moved.has(id) ? now.place : null;
+      if (changed) out.push({ kind: 'replace', target: target(id), base: contentVersion(old.node), proposed: now.node.toJSON(), place });
+      else if (place) out.push({ kind: 'move', target: target(id), base: contentVersion(old.node), proposed: null, place });
       continue;
     }
-    const changed = contentVersion(old.node) !== contentVersion(now.node);
-    const place = moved.has(id) ? now.place : null;
-    if (changed) out.push({ kind: 'replace', target: target(id), base: contentVersion(old.node), proposed: now.node.toJSON(), place });
-    else if (place) out.push({ kind: 'move', target: target(id), base: contentVersion(old.node), proposed: null, place });
-  }
-  for (const [id, now] of a) {
-    if (b.has(id)) continue;
     const parent = now.place.parentId;
     if (parent !== null && a.has(parent) && !b.has(parent)) continue;
-    out.push({ kind: 'insert', target: target(id), base: null, proposed: now.node.toJSON(), place: now.place });
+    // Blocks that were there already and moved in are moves of their own, not part of the insert.
+    out.push({ kind: 'insert', target: target(id), base: null, proposed: withoutBlocks(now.node.toJSON(), b), place: now.place });
   }
   return out;
+}
+
+/** A subtree's JSON without the blocks (with their children) in `drop`. */
+function withoutBlocks(json: Record<string, unknown>, drop: Map<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(json.content)) return json;
+  const content = (json.content as Record<string, unknown>[])
+    .filter((child) => !(child.type === 'blockContainer' && drop.has((child.attrs as { id: string }).id)))
+    .map((child) => withoutBlocks(child, drop))
+    .filter((child) => !(child.type === 'blockGroup' && (child.content as unknown[] | undefined ?? []).length === 0));
+  return { ...json, content };
 }
 
 function toPmDoc(fragment: Y.XmlFragment): PmNode {

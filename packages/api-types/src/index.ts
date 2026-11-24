@@ -668,12 +668,16 @@ export interface LivePageDTO {
 
 /** A block an agent writes: Markdown (several top-level nodes make several
  *  blocks, one list item per block), one HTML element, or BlockNote partial
- *  block JSON (for custom blocks and props). */
+ *  block JSON (for custom blocks and props). In an `add`'s JSON, a child
+ *  `{ existing: blockId }` moves that block (with its children) in, keeping
+ *  its id. */
 export type BlockInput = string | { html: string } | { json: Record<string, unknown> };
 
-/** One semantic edit of a live document (POST /api/documents/:docId/ops). */
+/** One semantic edit of a live document (POST /api/documents/:docId/ops).
+ *  An `add` that moves existing blocks in (`{ existing: blockId }` children)
+ *  maps each one to the version read in `expectVersions`. */
 export type LiveOp =
-  | { op: 'add'; at: Target; position: OpPosition; blocks: BlockInput[] }
+  | { op: 'add'; at: Target; position: OpPosition; blocks: BlockInput[]; expectVersions?: Record<string, string> }
   | { op: 'update'; target: Target; block: BlockInput; expectVersion: string }
   | { op: 'replaceRange'; from: Target; to: Target; blocks: BlockInput[]; expectVersions: Record<string, string> }
   | { op: 'delete'; target: Target; expectVersion: string }
@@ -751,8 +755,8 @@ export type SuggestionStatus = 'open' | 'accepted' | 'rejected' | 'withdrawn';
  *  `insert` a block subtree, `delete` one, `move` one to `place`). */
 export type SuggestedEditKind = 'replace' | 'insert' | 'delete' | 'move';
 
-/** Where a block goes: after `prevId`, else before `nextId`, else first in
- *  `parentId` (null: the document). */
+/** Where a block goes: after `prevId`, else before `nextId` (each only while
+ *  still in `parentId`), else first in `parentId` (null: the document). */
 export interface BlockPlace {
   parentId: string | null;
   prevId: string | null;

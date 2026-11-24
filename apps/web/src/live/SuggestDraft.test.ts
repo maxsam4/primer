@@ -59,6 +59,20 @@ describe('draftOps keeps structure', () => {
     expect(draftOps([nest(a, x), b], [nest(a, x), n, b], versions, 'main')).toMatchObject([{ op: 'add', at: at('a'), position: 'after' }]);
   });
 
+  it('an existing block nested under a new one moves in with it, keeping its id', () => {
+    const changed = { ...x, content: [{ type: 'text', text: 'Child, reworded', styles: {} }] };
+    expect(draftOps([a, nest(b, x), c], [a, nest(n, b, changed), c], versions, 'main')).toEqual([
+      {
+        op: 'add',
+        at: at('a'),
+        position: 'after',
+        blocks: [{ json: { type: 'paragraph', props: {}, content: n.content, children: [{ existing: 'b' }, { existing: 'x' }] } }],
+        expectVersions: { b: 'vb', x: 'vx' },
+      },
+      { op: 'update', target: at('x'), block: { json: { type: 'paragraph', props: {}, content: changed.content } }, expectVersion: 'vx' },
+    ]);
+  });
+
   it('adds and deletes around blocks are not moves', () => {
     expect(draftOps([a, b, c], [a, n, c], versions, 'main').map((o) => o.op)).toEqual(['add', 'delete']);
     expect(draftOps([a, b, c], [n, b, a], versions, 'main')).toMatchObject([

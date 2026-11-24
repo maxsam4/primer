@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/ariakit';
 import { primerSchema } from '@primer/blocks';
@@ -21,9 +21,13 @@ function flatten(blocks: DraftBlock[], parentId: string | null = null, out: Flat
   return out;
 }
 
-/** A new block as partial-block JSON, without ids (the server makes them). */
-function fresh(block: DraftBlock): Record<string, unknown> {
-  return { type: block.type, props: block.props, content: block.content, children: (block.children ?? []).map(fresh) };
+/** The props an update sets: those that changed (all of them on a type
+ *  change). Props the draft didn't touch stay as the document has them. */
+function changedProps(was: DraftBlock, now: DraftBlock): Record<string, unknown> {
+  const props = (now.props ?? {}) as Record<string, unknown>;
+  if (was.type !== now.type) return props;
+  const old = (was.props ?? {}) as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(props).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(old[k])));
 }
 
 /** The siblings that were siblings already and keep their order (the longest
@@ -55,8 +59,9 @@ function staying(siblings: DraftBlock[], parentId: string | null, before: Map<st
  * parent or out of order among its siblings a move, a removed one a delete,
  * and new blocks (with their children) are added after their previous sibling,
  * else as their parent's first child, else before the next sibling that stays.
- * `versions` are the blocks' versions at the start, so a block someone changed
- * since is a conflict to decide.
+ * An existing block nested under a new one goes in with it as `{ existing: id }`,
+ * so it keeps its id and the add moves it in whole. `versions` are the blocks'
+ * versions at the start, so a block someone changed since is a conflict to decide.
  */
 export function draftOps(base: DraftBlock[], draft: DraftBlock[], versions: Map<string, string>, tabId: string): LiveOp[] {
   const before = new Map(flatten(base).map((f) => [f.block.id, f]));
@@ -83,20 +88,40 @@ export function draftOps(base: DraftBlock[], draft: DraftBlock[], versions: Map<
           adds.set(`${position}:${anchor}`, add);
           ops.push(add);
         }
-        add.blocks.push({ json: fresh(block) });
+        const into = add;
+        /** A new block as partial-block JSON without ids (the server makes
+         *  them); existing descendants are moved in by id. */
+        const fresh = (b: DraftBlock): Record<string, unknown> => {
+          const version = versions.get(b.id);
+          if (before.has(b.id) && version) {
+            into.expectVersions = { ...into.expectVersions, [b.id]: version };
+            pending.push(b);
+            return { existing: b.id };
+          }
+          return { type: b.type, props: b.props, content: b.content, children: (b.children ?? []).map(fresh) };
+        };
+        const pending: DraftBlock[] = [];
+        into.blocks.push({ json: fresh(block) });
+        for (const b of pending) keep(b);
         return;
       }
-      kept.add(block.id);
       const version = versions.get(block.id);
       const to = stays.has(block.id) ? null : place();
       if (to && version) ops.push({ op: 'move', target: at(block.id), at: at(to[0]), position: to[1], expectVersion: version });
-      if (old.key !== keyOf(block) && version) {
-        const { type, props, content } = block;
-        ops.push({ op: 'update', target: at(block.id), block: { json: { type, props, content } as Record<string, unknown> }, expectVersion: version });
-      }
+      keep(block);
       previous = block.id;
-      walk(block.children ?? [], block.id);
     });
+  };
+  /** An existing block in the draft: its own change, then its children. */
+  const keep = (block: DraftBlock) => {
+    kept.add(block.id);
+    const version = versions.get(block.id);
+    const props = changedProps(before.get(block.id)!.block, block);
+    if (before.get(block.id)!.key !== keyOf(block) && version) {
+      const { type, content } = block;
+      ops.push({ op: 'update', target: at(block.id), block: { json: { type, props, content } as Record<string, unknown> }, expectVersion: version });
+    }
+    walk(block.children ?? [], block.id);
   };
   walk(draft, null);
 
@@ -108,28 +133,38 @@ export function draftOps(base: DraftBlock[], draft: DraftBlock[], versions: Map<
   return ops;
 }
 
+/** The tab's blocks as a tree, from a live read (flattened depth-first,
+ *  children after their parent). */
+function treeOf(blocks: LiveDocDTO['blocks']): DraftBlock[] {
+  const roots: DraftBlock[] = [];
+  const byId = new Map<string, DraftBlock>();
+  for (const b of blocks) {
+    const node = { ...(b.json as DraftBlock), children: [] as DraftBlock[] };
+    byId.set(b.target.blockId, node);
+    (b.parentId ? byId.get(b.parentId)!.children! : roots).push(node);
+  }
+  return roots;
+}
+
 /**
  * Suggesting: the tab as it was, in a draft editor of its own. Nothing
  * reaches the document until Send, which stores each change as a suggestion
  * (apply ops with `mode: 'suggest'`) for the owner or an editor to decide.
+ * The draft starts from one live read, so its blocks and the versions its
+ * ops expect are the same snapshot: whatever changed after it is a conflict.
  */
 export function SuggestDraft(props: {
   documentId: string;
   tabId: string;
-  base: DraftBlock[];
   theme: 'light' | 'dark';
   onDiscard: () => void;
   onSent: (count: number) => void;
 }) {
-  const { documentId, tabId, base } = props;
-  const [versions, setVersions] = useState<Map<string, string> | null>(null);
+  const { documentId, tabId } = props;
+  const [start, setStart] = useState<{ blocks: DraftBlock[]; versions: Map<string, string> } | null>(null);
   const [count, setCount] = useState(0);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const draft = useCreateBlockNote(
-    { schema: primerSchema, initialContent: base.length > 0 ? (base as never) : undefined, dictionary: editorDictionary() },
-    [],
-  );
 
   useEffect(() => {
     let live = true;
@@ -137,7 +172,7 @@ export function SuggestDraft(props: {
       .then(async (res) => {
         if (!res.ok) throw new Error(String(res.status));
         const body = (await res.json()) as LiveDocDTO;
-        if (live) setVersions(new Map(body.blocks.map((b) => [b.target.blockId, b.version])));
+        if (live) setStart({ blocks: treeOf(body.blocks), versions: new Map(body.blocks.map((b) => [b.target.blockId, b.version])) });
       })
       .catch((err: unknown) => live && setError(t('suggestDraft.failed', { status: String((err as Error).message) })));
     return () => {
@@ -145,12 +180,23 @@ export function SuggestDraft(props: {
     };
   }, [documentId, tabId]);
 
-  const ops = () => (versions ? draftOps(base, draft.document as DraftBlock[], versions, tabId) : []);
+  const draft = useCreateBlockNote(
+    {
+      schema: primerSchema,
+      initialContent: start && start.blocks.length > 0 ? (start.blocks as never) : undefined,
+      dictionary: editorDictionary(),
+    },
+    [start],
+  );
+  // The draft as the editor first holds it: the base its ops are diffed from.
+  const base = useMemo(() => draft.document as DraftBlock[], [draft]);
+
+  const ops = () => (start ? draftOps(base, draft.document as DraftBlock[], start.versions, tabId) : []);
   useEffect(() => {
     setCount(ops().length);
     return draft.onChange(() => setCount(ops().length));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, versions]);
+  }, [draft, base, start]);
 
   const send = async () => {
     const list = ops();
@@ -205,7 +251,7 @@ export function SuggestDraft(props: {
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-l-2 border-emerald-500 py-4">
-        <BlockNoteView editor={draft} theme={props.theme} />
+        {start && <BlockNoteView editor={draft} theme={props.theme} />}
       </div>
     </div>
   );

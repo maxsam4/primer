@@ -115,20 +115,29 @@ function stillAt(doc: PmNode, blockId: string, after: BlockPlace): boolean {
   return now.prevId === after.prevId || now.nextId === after.nextId;
 }
 
-/** Inserts `node` at its recorded place: after its previous sibling, before
- *  its next one, first in its parent, or first in the document. */
+/** Inserts `node` at its recorded place: after its previous sibling, else
+ *  before its next one, else first in its parent, else first in the document.
+ *  A sibling counts only while it is still in that parent (unless the parent
+ *  is gone): one that moved elsewhere since is no anchor. */
 export function insertAt(tr: Transform, node: PmNode, place: BlockPlace): Refusal | void {
-  const prev = place.prevId ? findBlock(tr.doc, place.prevId) : null;
+  const parent = place.parentId ? findBlock(tr.doc, place.parentId) : null;
+  const sibling = (id: string | null) => {
+    const found = id ? findBlock(tr.doc, id) : null;
+    if (!found || (place.parentId !== null && !parent)) return found;
+    const $pos = tr.doc.resolve(found.pos);
+    const parentId = $pos.depth > 1 ? (($pos.node($pos.depth - 1).attrs.id as string | undefined) ?? null) : null;
+    return parentId === place.parentId ? found : null;
+  };
+  const prev = sibling(place.prevId);
   if (prev) {
     tr.insert(prev.pos + prev.node.nodeSize, node);
     return;
   }
-  const next = place.nextId ? findBlock(tr.doc, place.nextId) : null;
+  const next = sibling(place.nextId);
   if (next) {
     tr.insert(next.pos, node);
     return;
   }
-  const parent = place.parentId ? findBlock(tr.doc, place.parentId) : null;
   if (parent) {
     insertFirstChild(tr, parent, node);
     return;

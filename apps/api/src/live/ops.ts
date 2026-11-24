@@ -18,7 +18,7 @@ import { db } from '../db/client.ts';
 import { readableLiveDoc } from '../lib/liveThreads.ts';
 import { canEdit } from '../lib/permissions.ts';
 import { blockVersion, findBlock } from './blocks.ts';
-import { InputError, inputToBlocks } from './convert.ts';
+import { EXISTING_PREFIX, InputError, inputToBlocks } from './convert.ts';
 import { originFor } from './origin.ts';
 import { applyPlan, dryRun, type AppliedBlock, type Located, type PlannedEdit } from './pipeline.ts';
 import { fragmentName, reachableFragments } from './reach.ts';
@@ -42,7 +42,7 @@ export type ApplyOpsResult =
 
 /** One op, validated and converted, ready to become a PlannedEdit. */
 type Prepared =
-  | { op: 'add'; at: Target; position: OpPosition; nodes: PmNode[]; input: BlockInput[] }
+  | { op: 'add'; at: Target; position: OpPosition; nodes: PmNode[]; input: BlockInput[]; existing: string[]; expectVersions: Record<string, string> }
   | { op: 'update'; target: Target; expectVersion: string; input: UpdateInput; raw: BlockInput }
   | { op: 'replaceRange'; from: Target; to: Target; expectVersions: Record<string, string>; nodes: PmNode[]; input: BlockInput[] }
   | { op: 'delete'; target: Target; expectVersion: string }
@@ -247,18 +247,20 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
   };
   const version = (v: unknown) => typeof v === 'string' && VERSION.test(v);
   const position = op.position === 'before' || op.position === 'after' || op.position === 'firstChild' ? op.position : null;
-  const blocks = async (list: unknown): Promise<{ nodes: PmNode[]; input: BlockInput[] } | { error: string; fix: string }> => {
+  const blocks = async (list: unknown): Promise<{ nodes: PmNode[]; input: BlockInput[]; existing: string[] } | { error: string; fix: string }> => {
     if (!Array.isArray(list) || list.length === 0 || list.length > MAX_BLOCKS_PER_OP) {
       return { error: `\`blocks\` must list 1–${MAX_BLOCKS_PER_OP} blocks.`, fix: 'Send at least one block.' };
     }
     const nodes: PmNode[] = [];
+    const existing: string[] = [];
     for (const input of list) {
       const converted = await convert(input as BlockInput);
       if ('error' in converted) return converted;
       nodes.push(...converted.nodes);
+      existing.push(...(converted.existing ?? []));
     }
     if (nodes.length === 0) return { error: 'The blocks are empty.', fix: 'Send some content.' };
-    return { nodes, input: list as BlockInput[] };
+    return { nodes, input: list as BlockInput[], existing };
   };
 
   switch (op.op) {
@@ -268,7 +270,19 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
       if (!position) return { error: '`position` must be "before", "after" or "firstChild".', fix: 'Say where the blocks go relative to `at`.' };
       const b = await blocks(op.blocks);
       if ('error' in b) return b;
-      return { op: 'add', at, position, ...b };
+      const ev = (op.expectVersions ?? {}) as Record<string, unknown>;
+      if (
+        typeof ev !== 'object' ||
+        new Set(b.existing).size !== b.existing.length ||
+        Object.keys(ev).length !== b.existing.length ||
+        !b.existing.every((id) => version(ev[id]))
+      ) {
+        return {
+          error: '`expectVersions` must map each { existing: blockId } child, named once, to the version you read, and nothing else.',
+          fix: 'Read the blocks you move in with primer_get_doc and send each one\'s version.',
+        };
+      }
+      return { op: 'add', at, position, ...b, expectVersions: ev as Record<string, string> };
     }
     case 'update': {
       const t = target('target');
@@ -314,7 +328,8 @@ async function prepareOp(raw: unknown): Promise<Prepared | { error: string; fix:
       }
       const b = await blocks(op.blocks);
       if ('error' in b) return b;
-      return { op: 'replaceRange', from, to, expectVersions: ev as Record<string, string>, ...b };
+      if (b.existing.length > 0) return { error: 'Only add moves existing blocks in ({ existing: blockId }).', fix: 'Use add, or move the blocks first.' };
+      return { op: 'replaceRange', from, to, expectVersions: ev as Record<string, string>, nodes: b.nodes, input: b.input };
     }
     case 'delete': {
       const t = target('target');
@@ -374,9 +389,26 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
       return {
         ...base,
         target: p.at,
-        build: guarded(p.at, (tr, at) => {
+        build: guarded(p.at, (tr, at, bctx) => {
           if (!at) return gone(p.at);
+          const refused = existingBlocks(tr.doc, at, p, bctx.suggesting);
+          if (refused) return refused;
           insertAt(tr, at, p.position, Fragment.fromArray(p.nodes));
+          // Each existing block leaves its place for its placeholder, children and all.
+          for (const id of p.existing) {
+            const from = findBlock(tr.doc, id)!;
+            const removed = removeBlock(tr, from);
+            if (removed) return removed;
+            const slot = findBlock(tr.doc, `${EXISTING_PREFIX}${id}`)!;
+            // Suggestions and undo follow blocks in nested blocks only, not in layout (columns).
+            const $slot = tr.doc.resolve(slot.pos);
+            const nested = Array.from({ length: $slot.depth + 1 }, (_, d) => $slot.node(d).type.name);
+            if (!nested.every((name) => name === 'doc' || name === 'blockGroup' || name === 'blockContainer')) {
+              return invalid(`Block ${id} can only move in as a nested block, not into a column or other layout.`, 'Move it into the layout with a separate edit.');
+            }
+            tr.replaceWith(slot.pos, slot.pos + slot.node.nodeSize, from.node);
+            bctx.moved(id);
+          }
         }),
       };
     case 'update':
@@ -467,6 +499,34 @@ function toEdit(p: Prepared, ctx: EditContext): PlannedEdit {
           tr.replaceWith(at!.pos, end, Fragment.fromArray(p.nodes));
         }),
       };
+  }
+}
+
+/** Why an add can't move its existing blocks in, if it can't: each must be a
+ *  block of the tab, not around `at`, at the version read (unless the add is
+ *  being suggested against the document as it is). One may be inside another:
+ *  it is then taken out of it. */
+function existingBlocks(doc: PmNode, at: NonNullable<Located>, p: Extract<Prepared, { op: 'add' }>, suggesting: boolean): Refusal | void {
+  const found = p.existing.map((id) => ({ id, block: findBlock(doc, id) }));
+  const inside = (outer: NonNullable<Located>, pos: number) => pos >= outer.pos && pos < outer.pos + outer.node.nodeSize;
+  const stale: { blockId: string; version: string | null }[] = [];
+  for (const { id, block } of found) {
+    if (!block) return gone({ ...p.at, blockId: id });
+    if (block.node.type.name !== 'blockContainer') return invalid(`Block ${id} can't be moved into another block.`, 'Move in ordinary blocks only.');
+    // Next to it is fine (the new block goes there before the block moves in); in it is not.
+    if (at.pos === block.pos ? p.position === 'firstChild' : inside(block, at.pos)) {
+      return invalid(`Block ${id} contains \`at\`; it can't move into a block added there.`, 'Pick an `at` outside the blocks you move in.');
+    }
+    const current = blockVersion(block.node);
+    if (current !== p.expectVersions[id]) stale.push({ blockId: id, version: current });
+  }
+  if (stale.length > 0 && !suggesting) {
+    return {
+      code: 'target_changed',
+      message: `${stale.length} block(s) this add moves in changed since you read them.`,
+      fix: 'Read them again and retry with their current versions.',
+      details: { blocks: stale },
+    };
   }
 }
 

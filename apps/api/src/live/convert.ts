@@ -14,14 +14,23 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: false, typograph
 
 export class InputError extends Error {}
 
+/** The id a placeholder block takes for an existing block an `add` moves in
+ *  (a `{ existing: blockId }` child in json input); ops.ts swaps it for the block. */
+export const EXISTING_PREFIX = 'existing:';
+
 /**
  * Converts one op's block input to blockContainer nodes in Primer's schema:
  * Markdown through markdown-it → HTML → BlockNote's HTML parser (one list
  * item per block; nested items become children), one HTML element the same
  * way, partial JSON through BlockNote's block conversion. Ids in the input are
- * dropped: the server names new blocks. Async, so it runs before the pipeline.
+ * dropped: the server names new blocks. In JSON, a child `{ existing: blockId }`
+ * stands for a block already in the document, moved in whole: it becomes a
+ * placeholder and its id is listed in `existing`. Async, so it runs before
+ * the pipeline.
  */
-export async function inputToBlocks(input: BlockInput): Promise<{ kind: InputKind; nodes: PmNode[]; props?: string[]; keys?: string[] }> {
+export async function inputToBlocks(
+  input: BlockInput,
+): Promise<{ kind: InputKind; nodes: PmNode[]; props?: string[]; keys?: string[]; existing?: string[] }> {
   const editor = serverEditor();
   if (typeof input === 'string') {
     // markdown-it keeps the newline after <br>; BlockNote would read it as a space.
@@ -35,21 +44,23 @@ export async function inputToBlocks(input: BlockInput): Promise<{ kind: InputKin
     const json = { ...(input.json as Record<string, unknown>) };
     delete json.id;
     if (typeof json.type !== 'string') throw new InputError('json blocks need a type.');
+    const existing: string[] = [];
+    if (Array.isArray(json.children)) json.children = json.children.map((child) => placeholders(child, existing));
     let nodes: PmNode[];
     try {
-      nodes = toNodes([json]);
+      nodes = toNodes([json], new Set(existing.map((id) => `${EXISTING_PREFIX}${id}`)));
     } catch (err) {
       throw new InputError(`BlockNote rejected the block: ${err instanceof Error ? err.message : String(err)}`);
     }
     const props = json.props && typeof json.props === 'object' ? Object.keys(json.props) : [];
-    return { kind: 'json', nodes, props, keys: Object.keys(json) };
+    return { kind: 'json', nodes, props, keys: Object.keys(json), ...(existing.length > 0 ? { existing } : {}) };
   }
   throw new InputError('A block is a Markdown string, { html: "<one element>" } or { json: PartialBlock }.');
 }
 
-function toNodes(blocks: unknown[]): PmNode[] {
+function toNodes(blocks: unknown[], keep = new Set<string>()): PmNode[] {
   if (blocks.length === 0) return [];
-  const stripped = blocks.map(stripIds);
+  const stripped = blocks.map((block) => stripIds(block, keep));
   const doc = serverEditor()._blocksToProsemirrorNode(stripped as never);
   doc.check();
   const nodes: PmNode[] = [];
@@ -57,8 +68,24 @@ function toNodes(blocks: unknown[]): PmNode[] {
   return nodes;
 }
 
-function stripIds(block: unknown): unknown {
+/** Replaces `{ existing: blockId }` children, at any depth, with placeholder blocks. */
+function placeholders(block: unknown, existing: string[]): unknown {
   if (!block || typeof block !== 'object') return block;
-  const { id: _id, children, ...rest } = block as Record<string, unknown>;
-  return Array.isArray(children) ? { ...rest, children: children.map(stripIds) } : rest;
+  const b = block as Record<string, unknown>;
+  if (typeof b.existing === 'string') {
+    if (Object.keys(b).length !== 1) throw new InputError('An { existing: blockId } child takes no other fields.');
+    existing.push(b.existing);
+    return { id: `${EXISTING_PREFIX}${b.existing}`, type: 'paragraph' };
+  }
+  // Only placeholders keep an id through stripIds.
+  const { id: _id, ...rest } = b;
+  return Array.isArray(rest.children) ? { ...rest, children: rest.children.map((child) => placeholders(child, existing)) } : rest;
+}
+
+/** Drops ids (the server names new blocks), except the placeholders' in `keep`. */
+function stripIds(block: unknown, keep: Set<string>): unknown {
+  if (!block || typeof block !== 'object') return block;
+  const { id, children, ...rest } = block as Record<string, unknown>;
+  const kept = typeof id === 'string' && keep.has(id) ? { id } : {};
+  return Array.isArray(children) ? { ...rest, ...kept, children: children.map((child) => stripIds(child, keep)) } : { ...rest, ...kept };
 }

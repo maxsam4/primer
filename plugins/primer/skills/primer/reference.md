@@ -177,7 +177,7 @@ For an HTML page document, `pages` lists each page block: `source` (the page as 
 Edit a live document by block. Read it first with `primer_get_doc`; `authoring.md` describes the workflow.
 
 - **Input:** `{ documentId, baseVersion?, ops, runId?, onConflict?: "refuse" | "suggest", allowCommentedDelete? }`. Ops:
-  - `{ op: "add", at: Target, position: "before" | "after" | "firstChild", blocks: BlockInput[] }` (`firstChild`: as `at`'s first child)
+  - `{ op: "add", at: Target, position: "before" | "after" | "firstChild", blocks: BlockInput[] }` (`firstChild`: as `at`'s first child). In a `{ json }` block, a child `{ existing: blockId }` moves that block (with its children) in, keeping its id; name each one's version in `expectVersions: { blockId: version }`.
   - `{ op: "update", target, block: BlockInput, expectVersion }`. On a page's text, `target` is `{ tabId, blockId, pid }` and `block` is the new plain text.
   - `{ op: "replaceRange", from, to, blocks, expectVersions: { [blockId]: version } }` (every block from `from` to `to`, siblings)
   - `{ op: "delete", target, expectVersion }`

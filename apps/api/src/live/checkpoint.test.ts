@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { flushAutoCheckpoints } from './autoCheckpoint.ts';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { CheckpointResponse, Reconciliation } from '@polygonlabs/primer-api-types';
 import { createApp } from '../app.ts';
 import { MOCK_USER } from '../auth/resolver.ts';
@@ -18,7 +18,8 @@ import { readBundleFile, type BundleThread } from './bundle.ts';
 import { captureState, restoreCheckpoint, writeCheckpoint } from './checkpoint.ts';
 import { readBlocks, serverEditor } from './editor.ts';
 import { exportMarkdown } from './export.ts';
-import { makeAgent, withLiveDoc } from './live.testlib.ts';
+import { makeAgent, until, withLiveDoc } from './live.testlib.ts';
+import { EVENT_ORDER_LOCK_KEY } from '../lib/events.ts';
 import { originFor } from './origin.ts';
 import { applyPlan, type PlannedEdit } from './pipeline.ts';
 import { createLegacyDocument } from '../testing/legacy.ts';
@@ -80,6 +81,36 @@ describe('checkpoints', () => {
       const updates = await db.select().from(docUpdates).where(eq(docUpdates.documentId, documentId));
       expect(Math.max(...updates.map((u) => u.id))).toBeGreaterThan(captured.docVersion);
       expect(await liveExport(documentId)).toContain('Then tabs, and comments.');
+    });
+  });
+
+  it('a checkpoint and an event written on the same document meanwhile both commit', async () => {
+    await withStorage(async (storage) => {
+      const { documentId } = await publish(storage, { content: SOURCE, format: 'markdown' });
+      const captured = await captureState(documentId, MOCK_USER);
+      // Another writer holds the events lock and has yet to insert its event
+      // (whose foreign key takes a KEY SHARE lock on the document row).
+      let insert!: () => void;
+      const ready = new Promise<void>((resolve) => (insert = resolve));
+      const writer = db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${EVENT_ORDER_LOCK_KEY})`);
+        await ready;
+        await tx.execute(sql`
+          INSERT INTO events (document_id, author_id, audience, namespace, type, payload)
+          VALUES (${documentId}, ${MOCK_USER.id}, 'collaborators', 'test', 'ping', '{}'::jsonb)
+        `);
+      });
+      try {
+        await until(async () => (await db.execute(sql`SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted`)).length > 0);
+        const checkpoint = writeCheckpoint(storage, documentId, MOCK_USER, null, captured);
+        // The checkpoint holds its lock on the document and waits for the events lock.
+        await until(async () => (await db.execute(sql`SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)).length > 0, 10_000);
+        insert();
+        await Promise.all([writer, checkpoint]);
+      } finally {
+        insert();
+        await writer.catch(() => undefined);
+      }
     });
   });
 

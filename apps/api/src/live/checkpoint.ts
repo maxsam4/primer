@@ -119,7 +119,9 @@ export async function writeCheckpoint(
   const frozenRecords = await readFrozenRecords(storage, bundle.bundleKey);
   try {
     const versionNumber = await transactionWithEvents(async (tx, emit) => {
-      await tx.execute(sql`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`);
+      // NO KEY UPDATE still serialises version allocation but does not conflict with the KEY SHARE
+      // an events writer takes (FK check) while holding the events lock.
+      await tx.execute(sql`SELECT id FROM documents WHERE id = ${documentId} FOR NO KEY UPDATE`);
       const [row] = (await tx.execute(sql`
         SELECT COALESCE(MAX(version_number), 0)::int AS latest FROM versions WHERE document_id = ${documentId}
       `)) as unknown as { latest: number }[];

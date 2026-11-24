@@ -338,7 +338,7 @@ interface EventInsert {
 // commits later. The lock serializes only the tail of each writing
 // transaction (the event inserts and the commit), which is why callers write
 // events last.
-const EVENT_ORDER_LOCK_KEY = 7_201_948_211;
+export const EVENT_ORDER_LOCK_KEY = 7_201_948_211;
 
 /** Documents written to, with their owners: who to wake after commit. */
 type Touched = { documentId: string; ownerId: string }[];

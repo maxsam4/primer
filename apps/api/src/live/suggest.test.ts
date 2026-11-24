@@ -407,4 +407,26 @@ describe('suggested structure changes', () => {
     await suggestAndAccept(id, [{ op: 'add', at: main('a'), position: 'firstChild', blocks: [{ json: { type: 'paragraph', props: {}, content: [{ type: 'text', text: 'New', styles: {} }], children: [] } }] }]);
     expect(await outline(id)).toEqual(['Alpha', '  New', 'Beta']);
   });
+
+  it('existing blocks nested under a new one keep their ids, in one suggestion', async () => {
+    const id = await createLiveDoc();
+    await seedBlocks(id, [paragraph('a', 'Alpha'), block('b', 'Beta', paragraph('x', 'Child')), paragraph('c', 'Gamma')]);
+    const v = await versions(id, owner);
+    const text = (t: string) => [{ type: 'text', text: t, styles: {} }];
+    await suggestAndAccept(id, [
+      {
+        op: 'add',
+        at: main('a'),
+        position: 'after',
+        blocks: [{ json: { type: 'paragraph', content: text('New'), children: [{ existing: 'b' }, { existing: 'x' }, { existing: 'c' }, { type: 'paragraph', content: text('Fresh') }] } }],
+        expectVersions: { b: v.b, x: v.x, c: v.c },
+      },
+    ]);
+    expect(await outline(id)).toEqual(['Alpha', 'New', '  Beta', '  Child', '  Gamma', '  Fresh']);
+    const read = await getLiveDoc(id, owner, { format: 'json' });
+    if (!read.ok) throw new Error(read.refusal.message);
+    const ids = read.value.blocks.map((b) => b.target.blockId);
+    expect(ids.filter((i) => ['b', 'x', 'c'].includes(i))).toEqual(['b', 'x', 'c']);
+    expect(ids).toHaveLength(6);
+  });
 });

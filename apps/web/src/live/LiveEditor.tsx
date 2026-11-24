@@ -27,7 +27,7 @@ import { commentDeleteGuard, type HeldDelete } from './commentDeleteGuard.ts';
 import { DeleteCommentedDialog } from './DeleteCommentedDialog.tsx';
 import { relayLiveEvents, useThreadEvents } from './threadEvents.ts';
 import { SuggestionsPanel } from './SuggestionsPanel.tsx';
-import { SuggestDraft, type DraftBlock } from './SuggestDraft.tsx';
+import { SuggestDraft } from './SuggestDraft.tsx';
 import { ThreadActions } from './ThreadActions.tsx';
 import { CatchUpPanel, ChangeHighlights, useCheckpointChanges } from './changes.tsx';
 import { useBlockServices, type ChoiceStore } from './blockServices.ts';
@@ -77,6 +77,25 @@ type BoundDataTableProps = { blockId: string; props: DataTableBlockProps; update
 function BoundDataTableView(p: BoundDataTableProps & { canWrite: boolean }) {
   const context = useContext(PageContext);
   return context ? <DataTableView {...context} {...p} /> : null;
+}
+
+const ReadOnlyDataTableView = (p: BoundDataTableProps) => <BoundDataTableView {...p} canWrite={false} />;
+
+/** A suggesting draft is inert until sent: its blocks cast no votes, make no
+ *  picks, write no records and edit no page text in the live document. */
+function InertBlocks({ children }: { children: ReactNode }) {
+  const services = useContext(PrimerBlocksContext);
+  const page = useContext(PageContext);
+  const inertServices = useMemo(
+    () => services && { ...services, canPick: false, canVote: false, DataTableView: ReadOnlyDataTableView },
+    [services],
+  );
+  const inertPage = useMemo(() => page && { ...page, canEdit: false }, [page]);
+  return (
+    <PrimerBlocksContext.Provider value={inertServices}>
+      <PageContext.Provider value={inertPage}>{children}</PageContext.Provider>
+    </PrimerBlocksContext.Provider>
+  );
 }
 
 /**
@@ -175,7 +194,7 @@ function TabEditor({
   const [filter, setFilter] = useState<'open' | 'resolved' | 'all'>('open');
   const [held, setHeld] = useState<HeldDelete | null>(null);
   // Suggesting: the tab as it was when suggesting began, edited as a draft.
-  const [draftBase, setDraftBase] = useState<DraftBlock[] | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   const [sentNote, setSentNote] = useState<string | null>(null);
   // Suggesting is open to anyone who may comment (the API's ops rule).
   const canSuggest = canComment;
@@ -248,11 +267,11 @@ function TabEditor({
       <div className="flex min-h-10 items-center gap-2 border-b border-neutral-200 px-3 py-1.5 sm:px-4 dark:border-neutral-800">
         {canSuggest && (
           <ModeSwitch
-            suggesting={draftBase !== null}
+            suggesting={suggesting}
             canEdit={!readOnly}
             onChange={(suggest) => {
               setSentNote(null);
-              setDraftBase(suggest ? (editor.document as DraftBlock[]) : null);
+              setSuggesting(suggest);
             }}
           />
         )}
@@ -284,22 +303,23 @@ function TabEditor({
       {sinceCheckpoint && <ChangeHighlights tone="checkpoint" blockIds={sinceCheckpoint} />}
       <BlockNoteView editor={editor} editable={!readOnly} theme={theme} renderEditor={false} slashMenu={false} className="flex min-h-0 flex-1">
         <ChipMenus editor={editor} slashItems={primerSlashItems(editor)} />
-        <div className={`min-w-0 flex-1 overflow-y-auto py-4 ${draftBase ? 'hidden' : ''}`}>
+        <div className={`min-w-0 flex-1 overflow-y-auto py-4 ${suggesting ? 'hidden' : ''}`}>
           <BlockNoteViewEditor />
         </div>
-        {draftBase && (
-          <SuggestDraft
-            documentId={documentId}
-            tabId={tabId}
-            base={draftBase}
-            theme={theme}
-            onDiscard={() => setDraftBase(null)}
-            onSent={(count) => {
-              setDraftBase(null);
-              setSentNote(t('suggestDraft.sent', { count }));
-              setSuggestionsOpen(true);
-            }}
-          />
+        {suggesting && (
+          <InertBlocks>
+            <SuggestDraft
+              documentId={documentId}
+              tabId={tabId}
+              theme={theme}
+              onDiscard={() => setSuggesting(false)}
+              onSent={(count) => {
+                setSuggesting(false);
+                setSentNote(t('suggestDraft.sent', { count }));
+                setSuggestionsOpen(true);
+              }}
+            />
+          </InertBlocks>
         )}
         {commentsOpen && (
           <div className={`${PANEL} p-2`} data-threads-sidebar>
