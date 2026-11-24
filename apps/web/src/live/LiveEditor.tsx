@@ -82,7 +82,8 @@ function BoundDataTableView(p: BoundDataTableProps & { canWrite: boolean }) {
 const ReadOnlyDataTableView = (p: BoundDataTableProps) => <BoundDataTableView {...p} canWrite={false} />;
 
 /** A suggesting draft is inert until sent: its blocks cast no votes, make no
- *  picks, write no records and edit no page text in the live document. */
+ *  picks, write no records and edit no page text in the live document, and its
+ *  page previews submit nothing (no messages reach the document route). */
 function InertBlocks({ children }: { children: ReactNode }) {
   const services = useContext(PrimerBlocksContext);
   const page = useContext(PageContext);
@@ -90,7 +91,10 @@ function InertBlocks({ children }: { children: ReactNode }) {
     () => services && { ...services, canPick: false, canVote: false, DataTableView: ReadOnlyDataTableView },
     [services],
   );
-  const inertPage = useMemo(() => page && { ...page, canEdit: false }, [page]);
+  const inertPage = useMemo(
+    () => page && { ...page, canEdit: false, onArtifactMessage: undefined, registerArtifactSender: undefined },
+    [page],
+  );
   return (
     <PrimerBlocksContext.Provider value={inertServices}>
       <PageContext.Provider value={inertPage}>{children}</PageContext.Provider>
